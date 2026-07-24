@@ -18,6 +18,26 @@ err := xapi.Decode(r, &response, xapi.NexacroJSON10)
 
 기본 strict 모드에서는 BLOB base64 whitespace를 거부하며, legacy payload에는 `WithCompatibility()`를 사용할 수 있습니다.
 
+`Codec`은 profile과 옵션을 보유하는 재사용 가능한 값입니다. 라이브러리는
+전역 singleton을 만들지 않으며, 호출자가 애플리케이션 초기화 시 공통 Codec을
+생성하고 공유하거나 profile/options별로 cache해야 합니다. 동일한 DTO type의
+reflection schema는 내부적으로 cache됩니다.
+
+```go
+codec, err := xapi.NewCodec(
+	xapi.NexacroJSON10,
+	xapi.WithStrictMode(),
+)
+if err != nil {
+	panic(err)
+}
+
+// 요청마다 NewCodec을 호출하지 않고 애플리케이션 수명 동안 재사용합니다.
+if err := codec.Decode(r, &response); err != nil {
+	// handle error
+}
+```
+
 XML legacy 변형은 `WithXMLParameterValueAttribute()`와
 `WithXMLVersionAttribute()`로 명시적으로 출력할 수 있으며, decoder는 두 Parameter
 표현과 `ver`/`version` root attribute를 모두 읽습니다.
