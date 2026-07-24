@@ -1,0 +1,11 @@
+{
+  "version": "1.0",
+  "Datasets": [{
+    "id": "output",
+    "ColumnInfo": {"Column": [{"id": "stockCode", "type": "STRING"}, {"id": "amount", "type": "BIGDECIMAL"}]},
+    "Rows": [
+      {"_RowType_": "U", "amount": 65.7700, "stockCode": "10001"},
+      {"_RowType_": "O", "amount": 64.0000, "stockCode": "10001"}
+    ]
+  }]
+}

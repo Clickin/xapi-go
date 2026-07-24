@@ -1,0 +1,23 @@
+{
+  "version": "1.0",
+  "Parameters": [
+    {"id": "ErrorCode", "value": 0, "type": "INT"},
+    {"id": "ErrorMsg", "value": "", "type": "STRING"}
+  ],
+  "Datasets": [
+    {
+      "id": "output",
+      "ColumnInfo": {
+        "ConstColumn": [{"id": "market", "type": "STRING", "value": "kse"}],
+        "Column": [
+          {"id": "stockCode", "type": "STRING", "size": "5"},
+          {"id": "currentprice", "type": "INT", "size": "10"},
+          {"id": "amount", "type": "BIGDECIMAL", "size": "31"}
+        ]
+      },
+      "Rows": [
+        {"_RowType_": "N", "currentprice": 5700, "amount": 65.7700, "stockCode": "10001"}
+      ]
+    }
+  ]
+}

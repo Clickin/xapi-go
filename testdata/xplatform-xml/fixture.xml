@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Root xmlns="http://www.tobesoft.com/platform/Dataset" ver="4000">
+  <Dataset id="users">
+    <ColumnInfo>
+      <Column id="id" type="INT" size="10"/>
+      <Column id="balance" type="BIGDECIMAL"/>
+    </ColumnInfo>
+    <Rows>
+      <Row><Col id="id">7</Col><Col id="balance">65.7700</Col></Row>
+    </Rows>
+  </Dataset>
+</Root>

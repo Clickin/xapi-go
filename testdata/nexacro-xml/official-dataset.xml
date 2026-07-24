@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Root xmlns="http://www.nexacroplatform.com/platform/dataset" ver="4000">
+  <Parameters>
+    <Parameter id="ErrorCode" type="INT">0</Parameter>
+    <Parameter id="ErrorMsg" type="STRING"></Parameter>
+  </Parameters>
+  <Dataset id="output">
+    <ColumnInfo>
+      <ConstColumn id="market" size="10" type="STRING" value="kse"/>
+      <Column id="stockCode" size="5" type="STRING"/>
+      <Column id="currentprice" size="10" type="INT"/>
+      <Column id="amount" size="31" type="BIGDECIMAL"/>
+    </ColumnInfo>
+    <Rows>
+      <Row>
+        <Col id="currentprice">5700</Col>
+        <Col id="amount">65.7700</Col>
+        <Col id="stockCode">10001</Col>
+      </Row>
+    </Rows>
+  </Dataset>
+</Root>
