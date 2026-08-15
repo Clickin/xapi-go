@@ -8,7 +8,7 @@ import (
 	"regexp"
 	"strings"
 
-	xapi "github.com/senghyunjo/xapi-go"
+	xapi "github.com/Clickin/xapi-go"
 )
 
 var identifierPattern = regexp.MustCompile(`[^A-Za-z0-9_]`)

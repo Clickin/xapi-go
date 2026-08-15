@@ -14,9 +14,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	xapi "github.com/senghyunjo/xapi-go"
-	conformancecodec "github.com/senghyunjo/xapi-go/internal/conformance/codec"
-	conformanceprotocol "github.com/senghyunjo/xapi-go/internal/conformance/protocol"
+	xapi "github.com/Clickin/xapi-go"
+	conformancecodec "github.com/Clickin/xapi-go/internal/conformance/codec"
+	conformanceprotocol "github.com/Clickin/xapi-go/internal/conformance/protocol"
 )
 
 type request struct {

@@ -73,7 +73,6 @@ func parseXMLWire(data []byte) (map[string]any, error) {
 	if len(wireRoot) > 0 {
 		value["wire"] = map[string]any{"root": wireRoot}
 	}
-	var directDatasets, wrappedDatasets []any
 	for _, child := range root.Children {
 		switch child.Name.Local {
 		case "Parameters":
@@ -98,19 +97,9 @@ func parseXMLWire(data []byte) (map[string]any, error) {
 				p["wire"] = map[string]any{"valueForm": form}
 				appendSlice(value, "parameters", p)
 			}
-		case "Datasets":
-			for _, ds := range children(child, "Dataset") {
-				wrappedDatasets = append(wrappedDatasets, parseXMLDataset(ds))
-			}
 		case "Dataset":
-			directDatasets = append(directDatasets, parseXMLDataset(child))
+			appendSlice(value, "datasets", parseXMLDataset(child))
 		}
-	}
-	for _, dataset := range wrappedDatasets {
-		appendSlice(value, "datasets", dataset)
-	}
-	for _, dataset := range directDatasets {
-		appendSlice(value, "datasets", dataset)
 	}
 	if err := validateCanonicalColumns(value); err != nil {
 		return nil, err
@@ -400,11 +389,11 @@ func appendSlice(m map[string]any, key string, value any) {
 func validateXMLStructure(root *xmlNode) error {
 	var datasets []*xmlNode
 	for _, child := range root.Children {
+		if child.Name.Local == "Datasets" {
+			return fmt.Errorf("Datasets wrapper is not allowed")
+		}
 		if child.Name.Local == "Dataset" {
 			datasets = append(datasets, child)
-		}
-		if child.Name.Local == "Datasets" {
-			datasets = append(datasets, children(child, "Dataset")...)
 		}
 	}
 	for _, dataset := range datasets {

@@ -1,3 +1,3 @@
-module github.com/senghyunjo/xapi-go
+module github.com/Clickin/xapi-go
 
 go 1.22

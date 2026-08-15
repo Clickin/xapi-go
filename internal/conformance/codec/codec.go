@@ -9,7 +9,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/senghyunjo/xapi-go/internal/conformance/protocol"
+	"github.com/Clickin/xapi-go/internal/conformance/protocol"
 )
 
 type DecodeOptions struct {
@@ -365,9 +365,6 @@ type xroot struct {
 	Parameters struct {
 		Items []xparam `xml:"Parameter"`
 	} `xml:"Parameters"`
-	Datasets struct {
-		Items []xdataset `xml:"Dataset"`
-	} `xml:"Datasets"`
 	DirectDatasets []xdataset `xml:"Dataset"`
 }
 type xparam struct {
@@ -410,7 +407,6 @@ type xcolvalue struct {
 
 type xmlSyntax struct {
 	ParameterSelfClosing []bool
-	HasDatasetsWrapper   bool
 	ConstAfterColumn     bool
 }
 
@@ -505,16 +501,7 @@ func xmlValue(b []byte, strict bool, profile string) (protocol.Value, error) {
 			Wire: map[string]any{"valueForm": form},
 		})
 	}
-	datasets := []xdataset{}
-	wrappedPos := bytes.Index(b, []byte("<Datasets"))
-	directPos := bytes.Index(b, []byte("<Dataset "))
-	if directPos >= 0 && (wrappedPos < 0 || directPos < wrappedPos) {
-		datasets = append(datasets, root.DirectDatasets...)
-		datasets = append(datasets, root.Datasets.Items...)
-	} else {
-		datasets = append(datasets, root.Datasets.Items...)
-		datasets = append(datasets, root.DirectDatasets...)
-	}
+	datasets := root.DirectDatasets
 	for _, item := range datasets {
 		if item.ID == "" {
 			return protocol.Value{}, fmt.Errorf("Dataset.id is required")
@@ -627,10 +614,9 @@ func xmlValue(b []byte, strict bool, profile string) (protocol.Value, error) {
 
 func validateXMLStructure(b []byte, strict bool, profile string) (xmlSyntax, error) {
 	allowed := map[string]map[string]bool{
-		"Root":       {"Parameters": true, "Dataset": true, "Datasets": true},
+		"Root":       {"Parameters": true, "Dataset": true},
 		"Parameters": {"Parameter": true},
 		"Dataset":    {"ColumnInfo": true, "Rows": true},
-		"Datasets":   {"Dataset": true},
 		"ColumnInfo": {"Column": true, "ConstColumn": true},
 		"Rows":       {"Row": true},
 		"Row":        {"Col": true, "OrgRow": true, "Org_Row": true},
@@ -647,7 +633,7 @@ func validateXMLStructure(b []byte, strict bool, profile string) (xmlSyntax, err
 		"Col":         {"id": true},
 	}
 	valid := map[string]bool{
-		"Root": true, "Parameters": true, "Parameter": true, "Datasets": true,
+		"Root": true, "Parameters": true, "Parameter": true,
 		"Dataset": true, "ColumnInfo": true, "Column": true, "ConstColumn": true,
 		"Rows": true, "Row": true, "OrgRow": true, "Org_Row": true, "Col": true,
 	}
@@ -680,6 +666,9 @@ func validateXMLStructure(b []byte, strict bool, profile string) (xmlSyntax, err
 					return syntax, fmt.Errorf("root element must be Root")
 				}
 				rootSeen = true
+			}
+			if element.Name.Local == "Datasets" {
+				return syntax, fmt.Errorf("Datasets wrapper is not allowed")
 			}
 			if !valid[element.Name.Local] {
 				skipDepth = 1

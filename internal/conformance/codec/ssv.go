@@ -6,7 +6,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/senghyunjo/xapi-go/internal/conformance/protocol"
+	"github.com/Clickin/xapi-go/internal/conformance/protocol"
 )
 
 const (

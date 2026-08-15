@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	xapi "github.com/senghyunjo/xapi-go"
+	xapi "github.com/Clickin/xapi-go"
 )
 
 type roundTrip func(*http.Request) (*http.Response, error)

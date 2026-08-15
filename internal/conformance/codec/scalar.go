@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/senghyunjo/xapi-go/internal/conformance/protocol"
+	"github.com/Clickin/xapi-go/internal/conformance/protocol"
 )
 
 var sourceDecimalPattern = regexp.MustCompile(`^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$`)

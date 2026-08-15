@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/senghyunjo/xapi-go/internal/conformance/protocol"
+	"github.com/Clickin/xapi-go/internal/conformance/protocol"
 )
 
 func validateValueTypes(value protocol.Value) error {

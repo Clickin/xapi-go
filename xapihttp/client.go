@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"strings"
 
-	xapi "github.com/senghyunjo/xapi-go"
+	xapi "github.com/Clickin/xapi-go"
 )
 
 // Client sends one xapi request and decodes its response. The core xapi
