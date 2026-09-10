@@ -17,7 +17,9 @@ func validateValueTypes(value protocol.Value) error {
 		return fmt.Errorf("invalid root saveType %d", value.SaveType)
 	}
 	for _, parameter := range value.Parameters {
-		if strings.EqualFold(parameter.Type, "DATASET") || strings.EqualFold(parameter.Type, "INVALID") { return fmt.Errorf("unsupported public XAPI type %q", parameter.Type) }
+		if strings.EqualFold(parameter.Type, "DATASET") || strings.EqualFold(parameter.Type, "INVALID") {
+			return fmt.Errorf("unsupported public XAPI type %q", parameter.Type)
+		}
 		if !isKnownType(defaultType(parameter.Type)) {
 			return fmt.Errorf("unsupported parameter type %q", parameter.Type)
 		}
@@ -27,13 +29,17 @@ func validateValueTypes(value protocol.Value) error {
 			return fmt.Errorf("invalid Dataset %q saveType %d", dataset.ID, dataset.SaveType)
 		}
 		for _, column := range dataset.Columns {
-			if strings.EqualFold(column.Type, "DATASET") || strings.EqualFold(column.Type, "INVALID") { return fmt.Errorf("unsupported public XAPI type %q", column.Type) }
+			if strings.EqualFold(column.Type, "DATASET") || strings.EqualFold(column.Type, "INVALID") {
+				return fmt.Errorf("unsupported public XAPI type %q", column.Type)
+			}
 			if !isKnownType(defaultType(column.Type)) {
 				return fmt.Errorf("unsupported column type %q", column.Type)
 			}
 		}
 		for _, column := range dataset.ConstColumns {
-			if strings.EqualFold(column.Type, "DATASET") || strings.EqualFold(column.Type, "INVALID") { return fmt.Errorf("unsupported public XAPI type %q", column.Type) }
+			if strings.EqualFold(column.Type, "DATASET") || strings.EqualFold(column.Type, "INVALID") {
+				return fmt.Errorf("unsupported public XAPI type %q", column.Type)
+			}
 			if !isKnownType(defaultType(column.Type)) {
 				return fmt.Errorf("unsupported constant column type %q", column.Type)
 			}
@@ -269,14 +275,18 @@ func toJSON(v protocol.Value) map[string]any {
 		cols := make([]any, 0, len(d.Columns))
 		for _, c := range d.Columns {
 			size := c.Size
-			if size == "" { size = jsonDefaultSize(c.Type) }
+			if size == "" {
+				size = jsonDefaultSize(c.Type)
+			}
 			column := jsonColumn{Size: size, ID: c.ID, Type: wireType(c.Type), Prop: c.Prop, SumText: c.SumText}
 			cols = append(cols, column)
 		}
 		consts := make([]any, 0, len(d.ConstColumns))
 		for _, c := range d.ConstColumns {
 			size := c.Size
-			if size == "" { size = jsonDefaultSize(c.Type) }
+			if size == "" {
+				size = jsonDefaultSize(c.Type)
+			}
 			column := jsonColumn{Size: size, ID: c.ID, Type: wireType(c.Type)}
 			if c.Value.State != "missing" {
 				column.Value = jsonScalar(c.Type, c.Value)

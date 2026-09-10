@@ -367,7 +367,7 @@ type xroot struct {
 	Parameters struct {
 		Items []xparam `xml:"Parameter"`
 	} `xml:"Parameters"`
-	DirectDatasets []xdataset `xml:"Dataset"`
+	DirectDatasets  []xdataset `xml:"Dataset"`
 	WrappedDatasets []xdataset `xml:"Datasets>Dataset"`
 }
 type xparam struct {
@@ -628,15 +628,23 @@ func xmlDatasetOrder(b []byte) map[string]int {
 	order := map[string]int{}
 	for index := 0; ; index++ {
 		start := bytes.Index(b, []byte("<Dataset"))
-		if start < 0 { return order }
+		if start < 0 {
+			return order
+		}
 		b = b[start+len("<Dataset"):]
 		idStart := bytes.Index(b, []byte(`id="`))
-		if idStart < 0 { continue }
+		if idStart < 0 {
+			continue
+		}
 		b = b[idStart+4:]
 		idEnd := bytes.IndexByte(b, '"')
-		if idEnd < 0 { return order }
+		if idEnd < 0 {
+			return order
+		}
 		id := string(b[:idEnd])
-		if _, exists := order[id]; !exists { order[id] = index }
+		if _, exists := order[id]; !exists {
+			order[id] = index
+		}
 		b = b[idEnd+1:]
 	}
 }
@@ -698,7 +706,9 @@ func validateXMLStructure(b []byte, strict bool, profile string) (xmlSyntax, err
 				rootSeen = true
 			}
 			if element.Name.Local == "Datasets" {
-				if !rootSeen { return syntax, fmt.Errorf("Datasets wrapper must be inside Root") }
+				if !rootSeen {
+					return syntax, fmt.Errorf("Datasets wrapper must be inside Root")
+				}
 			}
 			if !valid[element.Name.Local] {
 				skipDepth = 1
