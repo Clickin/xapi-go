@@ -7,6 +7,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	"github.com/Clickin/xapi-go/internal/conformance/protocol"
@@ -204,6 +205,7 @@ func jsonValue(b []byte, strict bool) (protocol.Value, error) {
 				if len(ds.Rows) == 0 || ds.Rows[len(ds.Rows)-1].Type != "U" {
 					return out, fmt.Errorf("invalid original row placement")
 				}
+				ds.Rows[len(ds.Rows)-1].OrgRow = &row
 				continue
 			}
 			ds.Rows = append(ds.Rows, row)
@@ -366,6 +368,7 @@ type xroot struct {
 		Items []xparam `xml:"Parameter"`
 	} `xml:"Parameters"`
 	DirectDatasets []xdataset `xml:"Dataset"`
+	WrappedDatasets []xdataset `xml:"Datasets>Dataset"`
 }
 type xparam struct {
 	Attr []xml.Attr `xml:",any,attr"`
@@ -423,6 +426,9 @@ func xmlValue(b []byte, strict bool, profile string) (protocol.Value, error) {
 	syntax, err := validateXMLStructure(b, strict, profile)
 	if err != nil {
 		return protocol.Value{}, err
+	}
+	if before, after := bytes.Index(b, []byte("<Column ")), bytes.Index(b, []byte("<ConstColumn ")); before >= 0 && after > before {
+		syntax.ConstAfterColumn = true
 	}
 	var root xroot
 	decoder := xml.NewDecoder(bytes.NewReader(b))
@@ -501,7 +507,16 @@ func xmlValue(b []byte, strict bool, profile string) (protocol.Value, error) {
 			Wire: map[string]any{"valueForm": form},
 		})
 	}
-	datasets := root.DirectDatasets
+	wrapped := bytes.Index(b, []byte("<Datasets"))
+	direct := bytes.Index(b, []byte("<Dataset "))
+	if wrapped >= 0 && (direct < 0 || wrapped < direct) {
+		datasets := append(root.WrappedDatasets, root.DirectDatasets...)
+		root.WrappedDatasets = datasets
+		root.DirectDatasets = nil
+	}
+	datasets := append(root.DirectDatasets, root.WrappedDatasets...)
+	order := xmlDatasetOrder(b)
+	sort.SliceStable(datasets, func(i, j int) bool { return order[datasets[i].ID] < order[datasets[j].ID] })
 	for _, item := range datasets {
 		if item.ID == "" {
 			return protocol.Value{}, fmt.Errorf("Dataset.id is required")
@@ -580,9 +595,6 @@ func xmlValue(b []byte, strict bool, profile string) (protocol.Value, error) {
 			known[column.ID] = true
 		}
 		for _, itemRow := range item.Rows.Items {
-			if strings.EqualFold(itemRow.Type, "delete") {
-				continue
-			}
 			if itemRow.Org == nil && itemRow.OrgUnderscore != nil {
 				itemRow.Cols = itemRow.OrgUnderscore.Cols
 			}
@@ -612,9 +624,27 @@ func xmlValue(b []byte, strict bool, profile string) (protocol.Value, error) {
 	return out, nil
 }
 
+func xmlDatasetOrder(b []byte) map[string]int {
+	order := map[string]int{}
+	for index := 0; ; index++ {
+		start := bytes.Index(b, []byte("<Dataset"))
+		if start < 0 { return order }
+		b = b[start+len("<Dataset"):]
+		idStart := bytes.Index(b, []byte(`id="`))
+		if idStart < 0 { continue }
+		b = b[idStart+4:]
+		idEnd := bytes.IndexByte(b, '"')
+		if idEnd < 0 { return order }
+		id := string(b[:idEnd])
+		if _, exists := order[id]; !exists { order[id] = index }
+		b = b[idEnd+1:]
+	}
+}
+
 func validateXMLStructure(b []byte, strict bool, profile string) (xmlSyntax, error) {
 	allowed := map[string]map[string]bool{
-		"Root":       {"Parameters": true, "Dataset": true},
+		"Root":       {"Parameters": true, "Dataset": true, "Datasets": true},
+		"Datasets":   {"Dataset": true},
 		"Parameters": {"Parameter": true},
 		"Dataset":    {"ColumnInfo": true, "Rows": true},
 		"ColumnInfo": {"Column": true, "ConstColumn": true},
@@ -668,7 +698,7 @@ func validateXMLStructure(b []byte, strict bool, profile string) (xmlSyntax, err
 				rootSeen = true
 			}
 			if element.Name.Local == "Datasets" {
-				return syntax, fmt.Errorf("Datasets wrapper is not allowed")
+				if !rootSeen { return syntax, fmt.Errorf("Datasets wrapper must be inside Root") }
 			}
 			if !valid[element.Name.Local] {
 				skipDepth = 1
@@ -804,6 +834,11 @@ func xmlRow(r xrow, columns []protocol.Column, constants []protocol.ConstColumn)
 				break
 			}
 		}
+	}
+	if typ == "U" && r.Org != nil && len(r.Org.Cols) > 0 {
+		original := xmlRow(xrow{Type: "original", Cols: r.Org.Cols}, columns, constants)
+		original.Type = "O"
+		row.OrgRow = &original
 	}
 	return row
 }

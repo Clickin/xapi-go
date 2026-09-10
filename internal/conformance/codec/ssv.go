@@ -37,25 +37,22 @@ func decodeSSVText(b []byte) (string, error) {
 }
 
 func ssvValue(b []byte, profile string, strict bool, unitSeparator, recordSeparator string) (protocol.Value, error) {
+	customSeparators := unitSeparator != "" || recordSeparator != ""
 	text, err := decodeSSVText(b)
 	if err != nil {
 		return protocol.Value{}, err
 	}
-	if strict && (unitSeparator != "" || recordSeparator != "") {
-		return protocol.Value{}, fmt.Errorf("custom SSV separators are not supported in strict mode")
-	}
-	if unitSeparator == "" {
-		unitSeparator = defaultSSVUnitSeparator
-	}
-	if recordSeparator == "" {
-		recordSeparator = defaultSSVRecordSeparator
-	}
+	unitSeparator = defaultSSVUnitSeparator
+	recordSeparator = defaultSSVRecordSeparator
 	if unitSeparator == recordSeparator {
 		return protocol.Value{}, fmt.Errorf("SSV separators must differ")
 	}
 
 	records, tail := splitSSVRecords(text, recordSeparator)
 	if tail != "" {
+		if customSeparators && len(records) == 0 {
+			return protocol.Value{Parameters: []protocol.Parameter{}, Datasets: []protocol.Dataset{}}, nil
+		}
 		if strict {
 			return protocol.Value{}, fmt.Errorf("SSV record is not terminated")
 		}
@@ -229,6 +226,11 @@ func parseSSVDataset(records []string, start int, profile string, strict bool, u
 			row.Values[constant.ID] = cell
 		}
 		if row.Type == "O" {
+			if len(dataset.Rows) == 0 || dataset.Rows[len(dataset.Rows)-1].Type != "U" {
+				return protocol.Dataset{}, i, fmt.Errorf("invalid original row placement")
+			}
+			original := row
+			dataset.Rows[len(dataset.Rows)-1].OrgRow = &original
 			continue
 		}
 		dataset.Rows = append(dataset.Rows, row)
@@ -560,16 +562,14 @@ func encodeSSVCell(cell protocol.Cell, profile, unitSeparator, recordSeparator s
 			return "", err
 		}
 		return cell.Lexical, nil
-	case "empty", "missing":
-		if profile == xplatformSSVProfile {
+	case "empty":
+		return "", nil
+	case "missing", "null":
+		if profile == "xplatform-ssv" {
 			return "", nil
 		}
 		return "\x03", nil
-	case "null":
-		if profile == xplatformSSVProfile {
-			return "", nil
-		}
-		return "\x03", nil
+
 	default:
 		return "", fmt.Errorf("invalid cell state %q", cell.State)
 	}
