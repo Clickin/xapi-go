@@ -3,39 +3,54 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"encoding/xml"
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/go-xml-experiment/xml/xmltext"
 )
 
 type xmlNode struct {
-	Name     xml.Name
-	Attr     []xml.Attr
+	Name     xmltext.Name
+	Attr     []xmltext.Attr
 	Children []*xmlNode
 	Text     string
 }
 
-func (n *xmlNode) UnmarshalXML(dec *xml.Decoder, start xml.StartElement) error {
-	n.Name, n.Attr = start.Name, append([]xml.Attr(nil), start.Attr...)
+// parseXMLNode reads the document's root element as a tree.
+func parseXMLNode(data []byte) (*xmlNode, error) {
+	d := xmltext.NewDecoderBytes(data)
+	var stack []*xmlNode
 	for {
-		tok, err := dec.Token()
+		t, err := d.ReadToken()
 		if err != nil {
-			return err
+			return nil, err
 		}
-		switch v := tok.(type) {
-		case xml.StartElement:
-			child := new(xmlNode)
-			if err := dec.DecodeElement(child, &v); err != nil {
-				return err
+		switch t.Kind() {
+		case xmltext.StartElement:
+			n := &xmlNode{Name: t.Name()}
+			for it := t.Attrs(); it.Next(); {
+				n.Attr = append(n.Attr, xmltext.Attr{Name: it.Name(), Value: string(it.Value())})
 			}
-			n.Children = append(n.Children, child)
-		case xml.CharData:
-			n.Text += string(v)
-		case xml.Directive:
-			return fmt.Errorf("XML directives are not supported")
-		case xml.EndElement:
-			return nil
+			if len(stack) > 0 {
+				top := stack[len(stack)-1]
+				top.Children = append(top.Children, n)
+			}
+			stack = append(stack, n)
+		case xmltext.EndElement:
+			n := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			if len(stack) == 0 {
+				return n, nil
+			}
+		case xmltext.Text, xmltext.CData:
+			if len(stack) > 0 {
+				stack[len(stack)-1].Text += string(t.Text())
+			}
+		case xmltext.Directive:
+			if len(stack) > 0 {
+				return nil, fmt.Errorf("XML directives are not supported")
+			}
 		}
 	}
 }
@@ -48,26 +63,25 @@ func parseWire(data []byte, profile string) (map[string]any, error) {
 }
 
 func parseXMLWire(data []byte) (map[string]any, error) {
-	dec := xml.NewDecoder(bytes.NewReader(data))
-	var root xmlNode
-	if err := dec.Decode(&root); err != nil {
+	root, err := parseXMLNode(data)
+	if err != nil {
 		return nil, err
 	}
 	if root.Name.Local != "Root" {
 		return nil, fmt.Errorf("XML root must be Root")
 	}
 	value := map[string]any{"parameters": []any{}, "datasets": []any{}}
-	if err := validateXMLStructure(&root); err != nil {
+	if err := validateXMLStructure(root); err != nil {
 		return nil, err
 	}
 	wireRoot := map[string]any{}
 	if root.Name.Space != "" {
 		wireRoot["namespace"] = root.Name.Space
 	}
-	if v := xmlAttr(&root, "ver"); v != "" {
+	if v := xmlAttr(root, "ver"); v != "" {
 		wireRoot["ver"] = v
 	}
-	if v := xmlAttr(&root, "version"); v != "" {
+	if v := xmlAttr(root, "version"); v != "" {
 		wireRoot["version"] = v
 	}
 	if len(wireRoot) > 0 {

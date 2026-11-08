@@ -3,13 +3,14 @@ package xapi
 import (
 	"bytes"
 	"encoding/base64"
-	"encoding/xml"
 	"fmt"
 	"io"
 	"reflect"
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/go-xml-experiment/xml/xmltext"
 )
 
 func encodeXML(w io.Writer, src any, o options, p Profile) error {
@@ -27,9 +28,8 @@ func encodeXML(w io.Writer, src any, o options, p Profile) error {
 	if e = enforceValueLimits(v, s, o); e != nil {
 		return e
 	}
-	x := xml.NewEncoder(w)
 	out := &controlEntityWriter{w: w}
-	x = xml.NewEncoder(out)
+	x := newXMLWriter(out, p.namespace())
 	if _, e = io.WriteString(out, `<?xml version="1.0" encoding="utf-8"?>`); e != nil {
 		return e
 	}
@@ -41,8 +41,7 @@ func encodeXML(w io.Writer, src any, o options, p Profile) error {
 	if p == XPlatformXML5000 {
 		version = "5000"
 	}
-	root := xml.StartElement{Name: xml.Name{Local: "Root"}, Attr: []xml.Attr{{Name: xml.Name{Local: "xmlns"}, Value: p.namespace()}, {Name: xml.Name{Local: versionAttr}, Value: version}}}
-	if e = x.EncodeToken(root); e != nil {
+	if e = x.begin("Root", xmlnsAttr(p.namespace()), xmlAttrOf(versionAttr, version)); e != nil {
 		return e
 	}
 	if len(s.params) > 0 {
@@ -55,17 +54,17 @@ func encodeXML(w io.Writer, src any, o options, p Profile) error {
 			return e
 		}
 	}
-	if e = x.EncodeToken(root.End()); e != nil {
+	if e = x.end(); e != nil {
 		return e
 	}
-	if e = x.Flush(); e != nil {
+	if e = x.Close(); e != nil {
 		return e
 	}
 	return out.Flush()
 }
-func encodeParams(x *xml.Encoder, out io.Writer, v reflect.Value, fs []field, o options) error {
-	st := xml.StartElement{Name: xml.Name{Local: "Parameters"}}
-	if e := x.EncodeToken(st); e != nil {
+func encodeParams(x *xmlWriter, out io.Writer, v reflect.Value, fs []field, o options) error {
+	st := "Parameters"
+	if e := x.begin(st); e != nil {
 		return e
 	}
 	for _, f := range fs {
@@ -73,20 +72,20 @@ func encodeParams(x *xml.Encoder, out io.Writer, v reflect.Value, fs []field, o 
 		if (f.optional || optionalField(val)) && missingValue(val) {
 			continue
 		}
-		a := []xml.Attr{{Name: xml.Name{Local: "id"}, Value: f.name}, {Name: xml.Name{Local: "type"}, Value: strings.ToLower(f.typ)}}
+		a := []xmltext.Attr{xmlAttrOf("id", f.name), xmlAttrOf("type", strings.ToLower(f.typ))}
 		if f.size > 0 {
-			a = append(a, xml.Attr{Name: xml.Name{Local: "size"}, Value: strconv.Itoa(f.size)})
+			a = append(a, xmlAttrOf("size", strconv.Itoa(f.size)))
 		}
 		if o.xmlParamValueAttr && f.typ != "BLOB" {
 			ss, e := encodeScalar(val.Interface(), f.typ)
 			if e != nil {
 				return e
 			}
-			a = append(a, xml.Attr{Name: xml.Name{Local: "value"}, Value: ss})
-			if e = x.EncodeToken(xml.StartElement{Name: xml.Name{Local: "Parameter"}, Attr: a}); e != nil {
+			a = append(a, xmlAttrOf("value", ss))
+			if e = x.begin("Parameter", a...); e != nil {
 				return e
 			}
-			if e = x.EncodeToken(xml.EndElement{Name: xml.Name{Local: "Parameter"}}); e != nil {
+			if e = x.end(); e != nil {
 				return e
 			}
 			continue
@@ -95,25 +94,25 @@ func encodeParams(x *xml.Encoder, out io.Writer, v reflect.Value, fs []field, o 
 			return e
 		}
 	}
-	return x.EncodeToken(st.End())
+	return x.end()
 }
-func encodeDataset(x *xml.Encoder, out io.Writer, v reflect.Value, d dataset) error {
-	a := []xml.Attr{{Name: xml.Name{Local: "id"}, Value: d.name}}
-	if e := x.EncodeToken(xml.StartElement{Name: xml.Name{Local: "Dataset"}, Attr: a}); e != nil {
+func encodeDataset(x *xmlWriter, out io.Writer, v reflect.Value, d dataset) error {
+	a := []xmltext.Attr{xmlAttrOf("id", d.name)}
+	if e := x.begin("Dataset", a...); e != nil {
 		return e
 	}
-	ci := xml.StartElement{Name: xml.Name{Local: "ColumnInfo"}}
-	if e := x.EncodeToken(ci); e != nil {
+	ci := "ColumnInfo"
+	if e := x.begin(ci); e != nil {
 		return e
 	}
 	for _, f := range d.fields {
 		name := "Column"
-		attrs := []xml.Attr{{Name: xml.Name{Local: "id"}, Value: f.name}, {Name: xml.Name{Local: "type"}, Value: strings.ToLower(f.typ)}}
+		attrs := []xmltext.Attr{xmlAttrOf("id", f.name), xmlAttrOf("type", strings.ToLower(f.typ))}
 		if f.size > 0 {
-			attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "size"}, Value: strconv.Itoa(f.size)})
+			attrs = append(attrs, xmlAttrOf("size", strconv.Itoa(f.size)))
 		}
 		if f.typ == "BLOB" {
-			attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "enc"}, Value: "base64"})
+			attrs = append(attrs, xmlAttrOf("enc", "base64"))
 		}
 		if f.constant {
 			name = "ConstColumn"
@@ -132,20 +131,20 @@ func encodeDataset(x *xml.Encoder, out io.Writer, v reflect.Value, d dataset) er
 					return e
 				}
 			}
-			attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "value"}, Value: ss})
+			attrs = append(attrs, xmlAttrOf("value", ss))
 		}
-		if e := x.EncodeToken(xml.StartElement{Name: xml.Name{Local: name}, Attr: attrs}); e != nil {
+		if e := x.begin(name, attrs...); e != nil {
 			return e
 		}
-		if e := x.EncodeToken(xml.EndElement{Name: xml.Name{Local: name}}); e != nil {
+		if e := x.end(); e != nil {
 			return e
 		}
 	}
-	if e := x.EncodeToken(ci.End()); e != nil {
+	if e := x.end(); e != nil {
 		return e
 	}
-	rows := xml.StartElement{Name: xml.Name{Local: "Rows"}}
-	if e := x.EncodeToken(rows); e != nil {
+	rows := "Rows"
+	if e := x.begin(rows); e != nil {
 		return e
 	}
 	for i := 0; i < v.Len(); i++ {
@@ -165,11 +164,11 @@ func encodeDataset(x *xml.Encoder, out io.Writer, v reflect.Value, d dataset) er
 				original = rv.FieldByIndex(d.orgRowIndex)
 			}
 		}
-		rowStart := xml.StartElement{Name: xml.Name{Local: "Row"}}
+		var rowAttrs []xmltext.Attr
 		if rowType != RowNormal {
-			rowStart.Attr = []xml.Attr{{Name: xml.Name{Local: "type"}, Value: rowTypeXML(rowType)}}
+			rowAttrs = []xmltext.Attr{xmlAttrOf("type", rowTypeXML(rowType))}
 		}
-		if e := x.EncodeToken(rowStart); e != nil {
+		if e := x.begin("Row", rowAttrs...); e != nil {
 			return e
 		}
 		for _, f := range d.fields {
@@ -180,13 +179,13 @@ func encodeDataset(x *xml.Encoder, out io.Writer, v reflect.Value, d dataset) er
 			if (f.optional || optionalField(val)) && missingValue(val) {
 				continue
 			}
-			aa := []xml.Attr{{Name: xml.Name{Local: "id"}, Value: f.name}}
+			aa := []xmltext.Attr{xmlAttrOf("id", f.name)}
 			if e := encodeXMLScalarElement(x, out, aa, "Col", val, f.typ); e != nil {
 				return e
 			}
 		}
 		if (d.tracked || d.orgRowIndex != nil) && rowType == RowUpdate && original.IsValid() && !original.IsNil() {
-			if e := x.EncodeToken(xml.StartElement{Name: xml.Name{Local: "OrgRow"}}); e != nil {
+			if e := x.begin("OrgRow"); e != nil {
 				return e
 			}
 			ov := original.Elem()
@@ -197,26 +196,26 @@ func encodeDataset(x *xml.Encoder, out io.Writer, v reflect.Value, d dataset) er
 				if (f.optional || optionalField(ov.FieldByIndex(f.index))) && missingValue(ov.FieldByIndex(f.index)) {
 					continue
 				}
-				if e := encodeXMLScalarElement(x, out, []xml.Attr{{Name: xml.Name{Local: "id"}, Value: f.name}}, "Col", ov.FieldByIndex(f.index), f.typ); e != nil {
+				if e := encodeXMLScalarElement(x, out, []xmltext.Attr{xmlAttrOf("id", f.name)}, "Col", ov.FieldByIndex(f.index), f.typ); e != nil {
 					return e
 				}
 			}
-			if e := x.EncodeToken(xml.EndElement{Name: xml.Name{Local: "OrgRow"}}); e != nil {
+			if e := x.end(); e != nil {
 				return e
 			}
 		}
-		if e := x.EncodeToken(xml.EndElement{Name: xml.Name{Local: "Row"}}); e != nil {
+		if e := x.end(); e != nil {
 			return e
 		}
 	}
-	if e := x.EncodeToken(rows.End()); e != nil {
+	if e := x.end(); e != nil {
 		return e
 	}
-	return x.EncodeToken(xml.EndElement{Name: xml.Name{Local: "Dataset"}})
+	return x.end()
 }
 
-func writeXMLConstBlob(x *xml.Encoder, out io.Writer, d dataset, f field, attrs []xml.Attr) error {
-	if err := x.Flush(); err != nil {
+func writeXMLConstBlob(x *xmlWriter, out io.Writer, d dataset, f field, attrs []xmltext.Attr) error {
+	if err := x.sync(); err != nil {
 		return err
 	}
 	if _, err := io.WriteString(out, "<ConstColumn"); err != nil {
@@ -226,11 +225,7 @@ func writeXMLConstBlob(x *xml.Encoder, out io.Writer, d dataset, f field, attrs 
 		if _, err := io.WriteString(out, " "+a.Name.Local+"=\""); err != nil {
 			return err
 		}
-		var escaped bytes.Buffer
-		if err := xml.EscapeText(&escaped, []byte(a.Value)); err != nil {
-			return err
-		}
-		if _, err := io.WriteString(out, escaped.String()+`"`); err != nil {
+		if _, err := io.WriteString(out, xmlAttrEscaper.Replace(a.Value)+`"`); err != nil {
 			return err
 		}
 	}
@@ -280,17 +275,17 @@ func writeXMLConstBlob(x *xml.Encoder, out io.Writer, d dataset, f field, attrs 
 	return err
 }
 
-func encodeXMLScalarElement(x *xml.Encoder, out io.Writer, attrs []xml.Attr, name string, val reflect.Value, typ string) error {
+func encodeXMLScalarElement(x *xmlWriter, out io.Writer, attrs []xmltext.Attr, name string, val reflect.Value, typ string) error {
 	if unwrapped, _, _ := optionalValueState(val); unwrapped.IsValid() {
 		val = unwrapped
 	} else if val.Kind() == reflect.Pointer {
 		val = reflect.Zero(val.Type().Elem())
 	}
-	if e := x.EncodeToken(xml.StartElement{Name: xml.Name{Local: name}, Attr: attrs}); e != nil {
+	if e := x.begin(name, attrs...); e != nil {
 		return e
 	}
 	if typ == "BLOB" {
-		if e := x.Flush(); e != nil {
+		if e := x.sync(); e != nil {
 			return e
 		}
 		var r io.ReadCloser
@@ -329,18 +324,22 @@ func encodeXMLScalarElement(x *xml.Encoder, out io.Writer, attrs []xml.Attr, nam
 			if e != nil {
 				return e
 			}
-			if e = x.EncodeToken(xml.CharData([]byte(encoded))); e != nil {
+			if e = x.Text(encoded); e != nil {
 				return e
 			}
 		}
 	}
-	if e := x.EncodeToken(xml.EndElement{Name: xml.Name{Local: name}}); e != nil {
+	if e := x.end(); e != nil {
 		return e
 	}
 	return x.Flush()
 }
 func decodeXML(r io.Reader, dst any, o options, p Profile) error {
-	dec := xml.NewDecoder(&controlEntityReader{r: &documentReader{r: r, max: o.limits.MaxDocumentBytes}})
+	opts := []xmltext.Options{xmltext.SplitText(true), xmltext.MaxTokenSize(0)}
+	if o.compatibility {
+		opts = append(opts, xmltext.Permissive(true))
+	}
+	dec := xmltext.NewDecoder(&controlEntityReader{r: &documentReader{r: r, max: o.limits.MaxDocumentBytes}}, opts...)
 	v := reflect.ValueOf(dst)
 	if v.Kind() != reflect.Pointer || v.Elem().Kind() != reflect.Struct {
 		return fmt.Errorf("xapi: destination must be pointer to struct")
@@ -372,16 +371,22 @@ func decodeXML(r io.Reader, dst any, o options, p Profile) error {
 	rootSeen := false
 	var blob *blobAccumulator
 	var blobTarget reflect.Value
+	var attrBuf []xmltext.Attr
 	for {
-		t, e := dec.Token()
+		t, e := dec.ReadToken()
 		if e == io.EOF {
 			break
 		}
 		if e != nil {
 			return e
 		}
-		switch q := t.(type) {
-		case xml.StartElement:
+		switch t.Kind() {
+		case xmltext.StartElement:
+			attrBuf = attrBuf[:0]
+			for it := t.Attrs(); it.Next(); {
+				attrBuf = append(attrBuf, xmltext.Attr{Name: it.Name(), Value: string(it.Value())})
+			}
+			q := xmlStartTag{Name: t.Name(), Attr: attrBuf}
 			attrs := map[string]bool{}
 			for _, a := range q.Attr {
 				key := a.Name.Space + "\x00" + a.Name.Local
@@ -600,7 +605,8 @@ func decodeXML(r io.Reader, dst any, o options, p Profile) error {
 			default:
 				text.Reset()
 			}
-		case xml.CharData:
+		case xmltext.Text, xmltext.CData:
+			q := t.Text()
 			if o.strict && !rootSeen && !declarationSeen && len(q) > 0 {
 				return fmt.Errorf("xapi: XML content precedes declaration")
 			}
@@ -616,21 +622,21 @@ func decodeXML(r io.Reader, dst any, o options, p Profile) error {
 					return fmt.Errorf("xapi: scalar limit exceeded")
 				}
 			}
-		case xml.Directive:
-			d := strings.ToUpper(string(q))
+		case xmltext.Directive:
+			d := strings.ToUpper(string(t.Text()))
 			if strings.Contains(d, "DOCTYPE") || strings.Contains(d, "ENTITY") {
 				return fmt.Errorf("xapi: DTD and external entities are not allowed")
 			}
-		case xml.ProcInst:
-			if strings.EqualFold(q.Target, "xml") {
+		case xmltext.ProcInst:
+			if strings.EqualFold(t.Name().Local, "xml") {
 				declarationSeen = true
-				inst := strings.ToLower(string(q.Inst))
+				inst := strings.ToLower(string(t.Text()))
 				if strings.Contains(inst, "encoding") && !strings.Contains(inst, "utf-8") {
 					return fmt.Errorf("xapi: XML declaration is not UTF-8")
 				}
 			}
-		case xml.EndElement:
-			switch q.Name.Local {
+		case xmltext.EndElement:
+			switch t.Name().Local {
 			case "Parameter":
 				if blob != nil {
 					b, e := blob.Close()
@@ -760,7 +766,7 @@ func hasField(fs []field, name string) bool {
 	return false
 }
 
-func validXMLBlobEncoding(s xml.StartElement, o options) bool {
+func validXMLBlobEncoding(s xmlStartTag, o options) bool {
 	encoding := attr(s, "enc")
 	if encoding == "" && o.compatibility {
 		encoding = attr(s, "encrypt")
@@ -1083,7 +1089,7 @@ func decodeControlMarkers(s string) string {
 	}
 	return string(out)
 }
-func attr(s xml.StartElement, k string) string {
+func attr(s xmlStartTag, k string) string {
 	for _, a := range s.Attr {
 		if a.Name.Local == k {
 			return decodeControlMarkers(a.Value)
@@ -1092,11 +1098,65 @@ func attr(s xml.StartElement, k string) string {
 	return ""
 }
 
-func hasAttr(s xml.StartElement, k string) bool {
+func hasAttr(s xmlStartTag, k string) bool {
 	for _, a := range s.Attr {
 		if a.Name.Local == k {
 			return true
 		}
 	}
 	return false
+}
+
+// xmlWriter writes every element in the document's default namespace. An
+// element is always written with an end tag, as older clients have received.
+type xmlWriter struct {
+	*xmltext.Encoder
+	space string
+}
+
+func newXMLWriter(w io.Writer, space string) *xmlWriter {
+	return &xmlWriter{Encoder: xmltext.NewEncoder(w), space: space}
+}
+
+func (x *xmlWriter) begin(local string, attrs ...xmltext.Attr) error {
+	if e := x.BeginElement(xmltext.Name{Space: x.space, Local: local}); e != nil {
+		return e
+	}
+	for _, a := range attrs {
+		if e := x.Attr(a.Name, a.Value); e != nil {
+			return e
+		}
+	}
+	return nil
+}
+
+func (x *xmlWriter) end() error {
+	if e := x.CloseStartTag(); e != nil {
+		return e
+	}
+	return x.EndElement()
+}
+
+// sync writes everything so far, before bytes go directly to the output.
+func (x *xmlWriter) sync() error {
+	if e := x.CloseStartTag(); e != nil {
+		return e
+	}
+	return x.Flush()
+}
+
+func xmlAttrOf(local, value string) xmltext.Attr {
+	return xmltext.Attr{Name: xmltext.Name{Local: local}, Value: value}
+}
+
+func xmlnsAttr(space string) xmltext.Attr {
+	return xmltext.Attr{Name: xmltext.Name{Space: xmltext.XMLNSNamespace, Local: "xmlns"}, Value: space}
+}
+
+var xmlAttrEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "\t", "&#x9;", "\n", "&#xA;", "\r", "&#xD;")
+
+// xmlStartTag is a start element copied out of a decoder's token.
+type xmlStartTag struct {
+	Name xmltext.Name
+	Attr []xmltext.Attr
 }
