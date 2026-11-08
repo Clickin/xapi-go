@@ -501,8 +501,8 @@ func TestEncodePropagatesWriterErrors(t *testing.T) {
 	}
 }
 
-// These pin what the original XPLATFORM driver does with the same documents.
-func TestXMLDefaultModeMatchesOriginalDriver(t *testing.T) {
+// These pin how default mode reads unusual documents.
+func TestXMLDefaultModeReadsConformanceBehavior(t *testing.T) {
 	type doc struct {
 		Msg  string `xapi:"param=msg,type=STRING"`
 		Rows []struct {

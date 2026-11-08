@@ -37,11 +37,7 @@ func encodeXML(w io.Writer, src any, o options, p Profile) error {
 	if versionAttr == "" {
 		versionAttr = "ver"
 	}
-	version := "4000"
-	if p == XPlatformXML5000 {
-		version = "5000"
-	}
-	if e = x.begin("Root", xmlnsAttr(p.namespace()), xmlAttrOf(versionAttr, version)); e != nil {
+	if e = x.begin("Root", xmlnsAttr(p.namespace()), xmlAttrOf(versionAttr, "4000")); e != nil {
 		return e
 	}
 	if len(s.params) > 0 {
@@ -418,10 +414,7 @@ func decodeXML(r io.Reader, dst any, o options, p Profile) error {
 				// The root namespace is not checked in any mode, and the version
 				// only in strict mode: XPLATFORM/Nexacro peers vary in both.
 				if o.strict {
-					expectedVersion := "4000"
-					if p == XPlatformXML5000 {
-						expectedVersion = "5000"
-					}
+					const expectedVersion = "4000"
 					if ver := attr(q, "ver"); ver != "" && ver != expectedVersion {
 						return fmt.Errorf("xapi: unsupported XML version %q", ver)
 					}

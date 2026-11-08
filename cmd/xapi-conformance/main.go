@@ -238,7 +238,7 @@ func normalizeDecodedValue(value map[string]any, profile string, strict, project
 			value["wire"] = normalized
 		}
 		if root, ok := normalized["root"].(map[string]any); ok {
-			if profile == "xplatform-xml-4000" || profile == "xplatform-xml-5000" {
+			if profile == "xplatform-xml-4000" {
 				if version, exists := root["version"]; exists {
 					if _, hasVer := root["ver"]; !hasVer {
 						root["ver"] = version
@@ -255,12 +255,9 @@ func normalizeDecodedValue(value map[string]any, profile string, strict, project
 				root["namespace"] = "http://www.nexacroplatform.com/platform/dataset"
 				root["version"] = "4000"
 			}
-			if profile == "xplatform-xml-4000" || profile == "xplatform-xml-5000" {
+			if profile == "xplatform-xml-4000" {
 				root["namespace"] = "http://www.tobesoft.com/platform/Dataset"
 				root["ver"] = "4000"
-				if profile == "xplatform-xml-5000" {
-					root["ver"] = "5000"
-				}
 				delete(root, "version")
 			}
 		}
@@ -279,7 +276,7 @@ func normalizeDecodedValue(value map[string]any, profile string, strict, project
 					delete(column, "prop")
 					delete(column, "sumtext")
 					if key == "constColumns" {
-						if profile != "nexacro-xml-4000" && profile != "xplatform-xml-4000" && profile != "xplatform-xml-5000" {
+						if profile != "nexacro-xml-4000" && profile != "xplatform-xml-4000" {
 							column["index"] = len(array(dataset["columns"])) + i
 						}
 						delete(column, "value")
@@ -288,7 +285,7 @@ func normalizeDecodedValue(value map[string]any, profile string, strict, project
 			}
 		}
 	}
-	if profile == "nexacro-xml-4000" || profile == "xplatform-xml-4000" || profile == "xplatform-xml-5000" {
+	if profile == "nexacro-xml-4000" || profile == "xplatform-xml-4000" {
 		for _, rawParameter := range array(value["parameters"]) {
 			if parameter, ok := rawParameter.(map[string]any); ok && parameter["state"] == "empty" {
 				parameter["lexical"] = ""
@@ -345,8 +342,6 @@ func parseProfile(name string) (xapi.Profile, error) {
 	switch name {
 	case "xplatform-xml-4000":
 		return xapi.XPlatformXML4000, nil
-	case "xplatform-xml-5000":
-		return xapi.XPlatformXML5000, nil
 	case "nexacro-xml-4000":
 		return xapi.NexacroXML4000, nil
 	case "nexacro-json-1.0":
@@ -492,7 +487,7 @@ func failure(class, path, message string) response {
 }
 func capabilities() map[string]any {
 	profiles := make([]map[string]any, 0, 8)
-	for _, name := range []string{"nexacro-json-1.0", "nexacro-xml-4000", "xplatform-xml-4000", "xplatform-xml-5000", "nexacro-ssv", "xplatform-ssv", "nexacro-binary-5000", "xplatform-binary-5000"} {
+	for _, name := range []string{"nexacro-json-1.0", "nexacro-xml-4000", "xplatform-xml-4000", "nexacro-ssv", "xplatform-ssv", "nexacro-binary-5000", "xplatform-binary-5000"} {
 		options := []string{"strict", "base64Whitespace", "limits", "zlib"}
 		if name == "nexacro-ssv" || name == "xplatform-ssv" {
 			options = append(options, "ssvUnitSeparator", "ssvRecordSeparator")

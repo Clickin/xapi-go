@@ -115,7 +115,7 @@ func Encode(v protocol.Value, profile string) ([]byte, error) {
 	switch profile {
 	case "nexacro-json-1.0":
 		return json.Marshal(toJSON(v))
-	case "xplatform-xml-4000", "xplatform-xml-5000", "nexacro-xml-4000":
+	case "xplatform-xml-4000", "nexacro-xml-4000":
 		return encodeXML(v, profile)
 	case nexacroSSVProfile, xplatformSSVProfile:
 		return encodeSSV(v, profile)
@@ -374,9 +374,6 @@ func toJSON(v protocol.Value) map[string]any {
 func encodeXML(value protocol.Value, profile string) ([]byte, error) {
 	namespace := xmlNamespace(profile)
 	versionName, version := "ver", "4000"
-	if profile == "xplatform-xml-4000" || profile == "xplatform-xml-5000" {
-		version = "5000"
-	}
 	if root, ok := value.Wire["root"].(map[string]any); ok {
 		if configured, ok := root["namespace"].(string); ok && configured != "" {
 			namespace = configured
@@ -388,8 +385,8 @@ func encodeXML(value protocol.Value, profile string) ([]byte, error) {
 			versionName, version = "ver", configured
 		}
 	}
-	if profile == "xplatform-xml-4000" || profile == "xplatform-xml-5000" {
-		versionName, version = "ver", "5000"
+	if profile == "xplatform-xml-4000" {
+		versionName, version = "ver", "4000"
 		namespace = xmlNamespace(profile)
 	}
 
@@ -489,7 +486,7 @@ func writeXMLDataset(out *strings.Builder, dataset protocol.Dataset, profile str
 	out.WriteString(id)
 	out.WriteString(`">`)
 	out.WriteString("\n\t\t<ColumnInfo>")
-	if profile == "xplatform-xml-4000" || profile == "xplatform-xml-5000" {
+	if profile == "xplatform-xml-4000" {
 		for _, column := range dataset.Columns {
 			out.WriteString("\n\t\t\t")
 			if err := writeXMLColumn(out, column); err != nil {

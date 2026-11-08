@@ -56,12 +56,12 @@ func TestConformanceEncodingRegressions(t *testing.T) {
 			t.Fatal("Encode accepted internal binary parameter types")
 		}
 	})
-	t.Run("xplatform XML 5000 profile", func(t *testing.T) {
-		wire, err := Encode(protocol.Value{Parameters: []protocol.Parameter{}, Datasets: []protocol.Dataset{}}, "xplatform-xml-5000")
+	t.Run("xplatform XML profile", func(t *testing.T) {
+		wire, err := Encode(protocol.Value{Parameters: []protocol.Parameter{}, Datasets: []protocol.Dataset{}}, "xplatform-xml-4000")
 		if err != nil {
 			t.Fatal(err)
 		}
-		const expected = "PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz4KPFJvb3QgeG1sbnM9Imh0dHA6Ly93d3cudG9iZXNvZnQuY29tL3BsYXRmb3JtL2RhdGFzZXQiIHZlcj0iNTAwMCI+Cgk8UGFyYW1ldGVycy8+CjwvUm9vdD4K"
+		const expected = "PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz4KPFJvb3QgeG1sbnM9Imh0dHA6Ly93d3cudG9iZXNvZnQuY29tL3BsYXRmb3JtL0RhdGFzZXQiIHZlcj0iNDAwMCI+Cgk8UGFyYW1ldGVycy8+CjwvUm9vdD4K"
 		if got := base64.StdEncoding.EncodeToString(wire); got != expected {
 			t.Fatalf("wire = %s", got)
 		}

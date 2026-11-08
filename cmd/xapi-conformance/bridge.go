@@ -270,7 +270,7 @@ func hasNamespaceMismatch(canonical map[string]any, profile xapi.Profile) bool {
 	if namespace == "" {
 		return false
 	}
-	if profile == xapi.XPlatformXML4000 || profile == xapi.XPlatformXML5000 {
+	if profile == xapi.XPlatformXML4000 {
 		return namespace != "http://www.tobesoft.com/platform/Dataset"
 	}
 	return namespace != "http://www.nexacroplatform.com/platform/dataset"
@@ -367,9 +367,9 @@ func validateWithLibrary(data []byte, name string, canonical map[string]any) (er
 }
 
 // isRejectedValue reports a cell or parameter whose text cannot be converted to
-// its declared type. The original drivers turn an invalid DATE into null and keep
-// illegal base64 as it is; the typed API reports both so that bad data does not
-// read as a value.
+// its declared type. The vectors read an invalid DATE as null and keep illegal
+// base64 as it is; the typed API reports both so that bad data does not read as
+// a value.
 func isRejectedValue(err error) bool {
 	if err == nil {
 		return false

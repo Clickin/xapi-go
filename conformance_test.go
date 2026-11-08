@@ -68,16 +68,16 @@ func TestXMLProfileNamespaces(t *testing.T) {
 	}
 }
 
-func TestPublicXPlatformXML5000(t *testing.T) {
-	wire, err := Marshal(fixtureResponse{}, XPlatformXML5000)
+func TestPublicXPlatformXML4000(t *testing.T) {
+	wire, err := Marshal(fixtureResponse{}, XPlatformXML4000)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(wire), `xmlns="http://www.tobesoft.com/platform/dataset"`) || !strings.Contains(string(wire), `ver="5000"`) {
-		t.Fatalf("unexpected XPLATFORM 5000 XML: %s", wire)
+	if !strings.Contains(string(wire), `xmlns="http://www.tobesoft.com/platform/Dataset"`) || !strings.Contains(string(wire), `ver="4000"`) {
+		t.Fatalf("unexpected XPLATFORM XML: %s", wire)
 	}
 	var decoded fixtureResponse
-	if err := Unmarshal(wire, &decoded, XPlatformXML5000, WithStrictMode()); err != nil {
+	if err := Unmarshal(wire, &decoded, XPlatformXML4000, WithStrictMode()); err != nil {
 		t.Fatal(err)
 	}
 }
