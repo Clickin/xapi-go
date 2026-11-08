@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"reflect"
 	"regexp"
@@ -328,4 +329,51 @@ func invalidBlobCell(cell map[string]any) bool {
 	}
 	_, err := base64.StdEncoding.DecodeString(lexical)
 	return err != nil
+}
+
+// validateWithLibrary decodes data through the public API, in the mode callers
+// get by default, into a type built from the reference decode of the same input.
+// It only checks that the library accepts what the reference accepts; the values
+// are compared against the vector by the reference decode.
+//
+// SSV is left out: the library's SSV reader still rejects inputs the vectors
+// accept, such as a stream without a header.
+func validateWithLibrary(data []byte, name string, canonical map[string]any) (err error) {
+	if strings.Contains(name, "-ssv") {
+		return nil
+	}
+	profile, err := parseProfile(name)
+	if err != nil {
+		return nil
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic: %v", r)
+		}
+	}()
+	codec, err := xapi.NewCodec(profile)
+	if err != nil {
+		return err
+	}
+	typ, err := makeRootType(canonical)
+	if err != nil {
+		return err
+	}
+	err = codec.Decode(bytes.NewReader(data), reflect.New(typ).Interface())
+	if isRejectedValue(err) {
+		return nil
+	}
+	return err
+}
+
+// isRejectedValue reports a cell or parameter whose text cannot be converted to
+// its declared type. The original drivers turn an invalid DATE into null and keep
+// illegal base64 as it is; the typed API reports both so that bad data does not
+// read as a value.
+func isRejectedValue(err error) bool {
+	if err == nil {
+		return false
+	}
+	var corrupt base64.CorruptInputError
+	return errors.As(err, &corrupt) || strings.Contains(err.Error(), "invalid DATE ")
 }

@@ -142,7 +142,7 @@ func TestControlEntityHexAndNUL(t *testing.T) {
 			Value string `xapi:"col=value,type=STRING"`
 		} `xapi:"dataset=values"`
 	}
-	x := `<Root><Dataset id="values"><ColumnInfo/><Rows><Row><Col id="value">&#x1F;</Col></Row></Rows></Dataset></Root>`
+	x := `<Root><Dataset id="values"><ColumnInfo><Column id="value" type="string"/></ColumnInfo><Rows><Row><Col id="value">&#x1F;</Col></Row></Rows></Dataset></Root>`
 	if err := Unmarshal([]byte(x), &out, XPlatformXML4000); err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,7 @@ func TestCDATAKeepsNumericReferenceLiteral(t *testing.T) {
 			Value string `xapi:"col=value,type=STRING"`
 		} `xapi:"dataset=values"`
 	}
-	x := `<Root><Dataset id="values"><ColumnInfo/><Rows><Row><Col id="value"><![CDATA[&#1;]]></Col></Row></Rows></Dataset></Root>`
+	x := `<Root><Dataset id="values"><ColumnInfo><Column id="value" type="string"/></ColumnInfo><Rows><Row><Col id="value"><![CDATA[&#1;]]></Col></Row></Rows></Dataset></Root>`
 	if err := Unmarshal([]byte(x), &out, XPlatformXML4000); err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestControlAndCDATAAcrossReaderChunks(t *testing.T) {
 			Value string `xapi:"col=value,type=STRING"`
 		} `xapi:"dataset=values"`
 	}
-	x := `<Root><Dataset id="values"><ColumnInfo/><Rows><Row><Col id="value"><![CDATA[&#1;]]>x&#x1F;</Col></Row></Rows></Dataset></Root>`
+	x := `<Root><Dataset id="values"><ColumnInfo><Column id="value" type="string"/></ColumnInfo><Rows><Row><Col id="value"><![CDATA[&#1;]]>x&#x1F;</Col></Row></Rows></Dataset></Root>`
 	r := chunkReader{r: strings.NewReader(x), n: 1}
 	if err := Decode(r, &out, XPlatformXML4000); err != nil {
 		t.Fatal(err)
@@ -498,5 +498,51 @@ func TestEncodePropagatesWriterErrors(t *testing.T) {
 		if e := Encode(failWriter{}, src, p); e == nil {
 			t.Fatalf("%s swallowed writer error", p)
 		}
+	}
+}
+
+// These pin what the original XPLATFORM driver does with the same documents.
+func TestXMLDefaultModeMatchesOriginalDriver(t *testing.T) {
+	type doc struct {
+		Msg  string `xapi:"param=msg,type=STRING"`
+		Rows []struct {
+			Name string `xapi:"col=name,type=STRING"`
+		} `xapi:"dataset=rows"`
+	}
+	const params = `<Parameters><Parameter id="msg" type="string">hi</Parameter></Parameters>`
+	const columns = `<ColumnInfo><Column id="name" type="string"/></ColumnInfo>`
+	for _, tt := range []struct {
+		name, xml, msg, col string
+		wantErr             bool
+	}{
+		{name: "other namespace", xml: `<Root xmlns="urn:other" ver="4000">` + params + `</Root>`, msg: "hi"},
+		{name: "other version", xml: `<Root ver="9999">` + params + `</Root>`, msg: "hi"},
+		{name: "declared encoding ignored", xml: `<?xml version="1.0" encoding="EUC-KR"?><Root>` + params + `</Root>`, msg: "hi"},
+		{name: "comment and space after root", xml: `<Root>` + params + `</Root><!--c-->` + "\n", msg: "hi"},
+		{name: "text after root", xml: `<Root>` + params + `</Root>junk`, wantErr: true},
+		{name: "element after root", xml: `<Root>` + params + `</Root><x/>`, wantErr: true},
+		{name: "body text wins over value attribute", xml: `<Root><Parameters><Parameter id="msg" type="string" value="attr">text</Parameter></Parameters></Root>`, msg: "text"},
+		{name: "markup inside Col keeps text", xml: `<Root><Dataset id="rows">` + columns + `<Rows><Row><Col id="name">a<b>c</b>d</Col></Row></Rows></Dataset></Root>`, col: "acd"},
+		{name: "Col outside Row ignored", xml: `<Root>` + params + `<Dataset id="rows">` + columns + `<Rows><Col id="name">x</Col></Rows></Dataset></Root>`, msg: "hi"},
+		{name: "undeclared Col", xml: `<Root><Dataset id="rows"><ColumnInfo/><Rows><Row><Col id="name">x</Col></Row></Rows></Dataset></Root>`, wantErr: true},
+		{name: "Dataset without id", xml: `<Root><Dataset/></Root>`, wantErr: true},
+		{name: "OrgRow outside Row", xml: `<Root>` + params + `<Dataset id="rows">` + columns + `<Rows><OrgRow/></Rows></Dataset></Root>`, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var out doc
+			err := Unmarshal([]byte(tt.xml), &out, NexacroXML4000)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			if out.Msg != tt.msg {
+				t.Fatalf("msg = %q, want %q", out.Msg, tt.msg)
+			}
+			if tt.col != "" && (len(out.Rows) != 1 || out.Rows[0].Name != tt.col) {
+				t.Fatalf("rows = %+v, want Name %q", out.Rows, tt.col)
+			}
+		})
 	}
 }

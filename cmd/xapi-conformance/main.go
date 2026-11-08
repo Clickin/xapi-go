@@ -176,6 +176,9 @@ func handle(req request) response {
 		if path, err := preflightCanonicalLimits(valueMap, req.Options); err != nil {
 			return failure("limit-exceeded", path, err.Error())
 		}
+		if err := validateWithLibrary(in, req.Profile, valueMap); err != nil {
+			return failure("malformed-input", "wire", "library: "+err.Error())
+		}
 		if req.Operation == "decode" {
 			return response{OK: true, Value: valueMap}
 		}

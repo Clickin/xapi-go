@@ -40,11 +40,11 @@ func TestXMLRejectsDuplicateAttributes(t *testing.T) {
 	}
 }
 
-func TestXMLProfileRejectsWrongNamespace(t *testing.T) {
+func TestXMLProfileAcceptsAnyNamespace(t *testing.T) {
 	var out struct{}
 	x := `<Root xmlns="http://www.nexacroplatform.com/platform/dataset" ver="4000"/>`
-	if err := Unmarshal([]byte(x), &out, XPlatformXML4000); err == nil {
-		t.Fatal("wrong XML profile namespace accepted")
+	if err := Unmarshal([]byte(x), &out, XPlatformXML4000); err != nil {
+		t.Fatalf("the root namespace must not be checked: %v", err)
 	}
 }
 
@@ -83,8 +83,17 @@ func TestContentTypeCharset(t *testing.T) {
 }
 func TestXMLDeclarationCharset(t *testing.T) {
 	var out struct{}
-	if e := Unmarshal([]byte(`<?xml version="1.0" encoding="EUC-KR"?><Root/>`), &out, XPlatformXML4000); e == nil {
-		t.Fatal("non-UTF-8 XML accepted")
+	const declared = `<?xml version="1.0" encoding="EUC-KR"?><Root/>`
+	if e := Unmarshal([]byte(declared), &out, XPlatformXML4000, WithStrictMode()); e == nil {
+		t.Fatal("non-UTF-8 declaration accepted in strict mode")
+	}
+	if e := Unmarshal([]byte(declared), &out, XPlatformXML4000); e != nil {
+		t.Fatalf("default mode must ignore the declared encoding: %v", e)
+	}
+	// The bytes are still read as UTF-8: EUC-KR text must not pass as data.
+	raw := []byte("<?xml version=\"1.0\" encoding=\"EUC-KR\"?><Root>\xc7\xd1</Root>")
+	if e := Unmarshal(raw, &out, XPlatformXML4000); e == nil {
+		t.Fatal("invalid UTF-8 accepted under a non-UTF-8 declaration")
 	}
 }
 func TestDepthLimits(t *testing.T) {

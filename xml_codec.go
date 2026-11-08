@@ -339,6 +339,11 @@ func decodeXML(r io.Reader, dst any, o options, p Profile) error {
 	if o.compatibility {
 		opts = append(opts, xmltext.Permissive(true))
 	}
+	if !o.strict {
+		// The reference reader takes already decoded text, so the declared
+		// encoding has no effect. Non-UTF-8 bytes still fail as invalid UTF-8.
+		opts = append(opts, xmltext.WithCharsetReader(func(_ string, r io.Reader) (io.Reader, error) { return r, nil }))
+	}
 	dec := xmltext.NewDecoder(&controlEntityReader{r: &documentReader{r: r, max: o.limits.MaxDocumentBytes}}, opts...)
 	v := reflect.ValueOf(dst)
 	if v.Kind() != reflect.Pointer || v.Elem().Kind() != reflect.Struct {
@@ -369,6 +374,7 @@ func decodeXML(r io.Reader, dst any, o options, p Profile) error {
 	declarationSeen := false
 	sawColumn := false
 	rootSeen := false
+	valueFromAttr := false // the current scalar holds a Parameter's value attribute
 	var blob *blobAccumulator
 	var blobTarget reflect.Value
 	var attrBuf []xmltext.Attr
@@ -401,9 +407,6 @@ func decodeXML(r io.Reader, dst any, o options, p Profile) error {
 			}
 			if o.strict && depth == 1 {
 				legacyStrict = q.Name.Space == "" && !declarationSeen
-				if q.Name.Space != p.namespace() && !legacyStrict {
-					return fmt.Errorf("xapi: unexpected XML namespace %q", q.Name.Space)
-				}
 				if !hasAttr(q, "ver") && !hasAttr(q, "version") && !legacyStrict {
 					return fmt.Errorf("xapi: XML version attribute is required")
 				}
@@ -412,24 +415,19 @@ func decodeXML(r io.Reader, dst any, o options, p Profile) error {
 				if rootSeen || q.Name.Local != "Root" {
 					return fmt.Errorf("xapi: XML root must be Root")
 				}
-				if q.Name.Space != "" && q.Name.Space != p.namespace() {
-					other := XPlatformXML4000.namespace()
-					if p == XPlatformXML4000 {
-						other = NexacroXML4000.namespace()
+				// The root namespace is not checked in any mode, and the version
+				// only in strict mode: XPLATFORM/Nexacro peers vary in both.
+				if o.strict {
+					expectedVersion := "4000"
+					if p == XPlatformXML5000 {
+						expectedVersion = "5000"
 					}
-					if !o.compatibility || q.Name.Space != other {
-						return fmt.Errorf("xapi: unexpected XML namespace %q", q.Name.Space)
+					if ver := attr(q, "ver"); ver != "" && ver != expectedVersion {
+						return fmt.Errorf("xapi: unsupported XML version %q", ver)
 					}
-				}
-				expectedVersion := "4000"
-				if p == XPlatformXML5000 {
-					expectedVersion = "5000"
-				}
-				if ver := attr(q, "ver"); ver != "" && ver != expectedVersion {
-					return fmt.Errorf("xapi: unsupported XML version %q", ver)
-				}
-				if ver := attr(q, "version"); ver != "" && ver != expectedVersion {
-					return fmt.Errorf("xapi: unsupported XML version %q", ver)
+					if ver := attr(q, "version"); ver != "" && ver != expectedVersion {
+						return fmt.Errorf("xapi: unsupported XML version %q", ver)
+					}
 				}
 				rootSeen = true
 			}
@@ -447,6 +445,7 @@ func decodeXML(r io.Reader, dst any, o options, p Profile) error {
 				}
 				text.Reset()
 				blob = nil
+				valueFromAttr = false
 				for _, f := range s.params {
 					if f.name == id {
 						cur = nil
@@ -457,6 +456,7 @@ func decodeXML(r io.Reader, dst any, o options, p Profile) error {
 							blobTarget = v.Elem().FieldByIndex(f.index)
 						}
 						if hasAttr(q, "value") {
+							valueFromAttr = true
 							value := attr(q, "value")
 							if blob != nil {
 								if e := blob.Write([]byte(value)); e != nil {
@@ -474,10 +474,11 @@ func decodeXML(r io.Reader, dst any, o options, p Profile) error {
 					return fmt.Errorf("xapi: dataset limit exceeded")
 				}
 				id := attr(q, "id")
-				if o.strict && id == "" {
+				if id == "" {
 					return fmt.Errorf("xapi: Dataset id is required")
 				}
 				sawColumn = false
+				row = reflect.Value{}
 				for i := range s.datasets {
 					if s.datasets[i].name == id {
 						if seenDatasets[id] && o.strict {
@@ -586,13 +587,17 @@ func decodeXML(r io.Reader, dst any, o options, p Profile) error {
 					}
 				}
 			case "Col":
-				if cur != nil {
+				if cur != nil && row.IsValid() { // a Col outside any Row is ignored
 					col = attr(q, "id")
 					if o.strict && col == "" {
 						return fmt.Errorf("xapi: Col id is required")
 					}
+					if !wireColumnIDs[col] {
+						return fmt.Errorf("xapi: column %q not found in ColumnInfo of %s", col, cur.name)
+					}
 					text.Reset()
 					blob = nil
+					valueFromAttr = false
 					if i, ok := cur.lookup[col]; ok && cur.fields[i].typ == "BLOB" {
 						blob = &blobAccumulator{max: o.limits.MaxBlobBytes, allowWhitespace: o.base64WS}
 						blobTarget = row.FieldByIndex(cur.fields[i].index)
@@ -603,7 +608,9 @@ func decodeXML(r io.Reader, dst any, o options, p Profile) error {
 				}
 			case "ColumnInfo", "Rows":
 			default:
-				text.Reset()
+				if col == "" { // markup inside a Col keeps the text around it
+					text.Reset()
+				}
 			}
 		case xmltext.Text, xmltext.CData:
 			q := t.Text()
@@ -611,6 +618,13 @@ func decodeXML(r io.Reader, dst any, o options, p Profile) error {
 				return fmt.Errorf("xapi: XML content precedes declaration")
 			}
 			if col != "" {
+				if valueFromAttr && len(q) > 0 { // body text wins over the value attribute
+					valueFromAttr = false
+					text.Reset()
+					if blob != nil {
+						blob = &blobAccumulator{max: o.limits.MaxBlobBytes, allowWhitespace: o.base64WS}
+					}
+				}
 				if blob != nil {
 					if e := blob.Write(q); e != nil {
 						return e
@@ -631,7 +645,7 @@ func decodeXML(r io.Reader, dst any, o options, p Profile) error {
 			if strings.EqualFold(t.Name().Local, "xml") {
 				declarationSeen = true
 				inst := strings.ToLower(string(t.Text()))
-				if strings.Contains(inst, "encoding") && !strings.Contains(inst, "utf-8") {
+				if o.strict && strings.Contains(inst, "encoding") && !strings.Contains(inst, "utf-8") {
 					return fmt.Errorf("xapi: XML declaration is not UTF-8")
 				}
 			}
@@ -726,6 +740,7 @@ func decodeXML(r io.Reader, dst any, o options, p Profile) error {
 					} else {
 						appendReflect(target, row)
 					}
+					row = reflect.Value{}
 				}
 			case "ConstColumn":
 				if constID != "" {
