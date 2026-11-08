@@ -1,6 +1,6 @@
 # xapi-go
 
-독립 Go module로 XPLATFORM/Nexacro Dataset XML 4000 및 Nexacro JSON 1.0을 handwritten DTO에 바인딩하는 라이브러리입니다.
+XML codec profiles: XPLATFORM 4000/5000 and Nexacro 4000. The conformance adapter also advertises JSON 1.0, SSV, and PlatformBinary 5000 profiles.
 
 ```go
 type Response struct {

@@ -37,7 +37,11 @@ func encodeXML(w io.Writer, src any, o options, p Profile) error {
 	if versionAttr == "" {
 		versionAttr = "ver"
 	}
-	root := xml.StartElement{Name: xml.Name{Local: "Root"}, Attr: []xml.Attr{{Name: xml.Name{Local: "xmlns"}, Value: p.namespace()}, {Name: xml.Name{Local: versionAttr}, Value: "4000"}}}
+	version := "4000"
+	if p == XPlatformXML5000 {
+		version = "5000"
+	}
+	root := xml.StartElement{Name: xml.Name{Local: "Root"}, Attr: []xml.Attr{{Name: xml.Name{Local: "xmlns"}, Value: p.namespace()}, {Name: xml.Name{Local: versionAttr}, Value: version}}}
 	if e = x.EncodeToken(root); e != nil {
 		return e
 	}
@@ -412,10 +416,14 @@ func decodeXML(r io.Reader, dst any, o options, p Profile) error {
 						return fmt.Errorf("xapi: unexpected XML namespace %q", q.Name.Space)
 					}
 				}
-				if ver := attr(q, "ver"); ver != "" && ver != "4000" {
+				expectedVersion := "4000"
+				if p == XPlatformXML5000 {
+					expectedVersion = "5000"
+				}
+				if ver := attr(q, "ver"); ver != "" && ver != expectedVersion {
 					return fmt.Errorf("xapi: unsupported XML version %q", ver)
 				}
-				if ver := attr(q, "version"); ver != "" && ver != "4000" {
+				if ver := attr(q, "version"); ver != "" && ver != expectedVersion {
 					return fmt.Errorf("xapi: unsupported XML version %q", ver)
 				}
 				rootSeen = true

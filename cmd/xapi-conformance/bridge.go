@@ -269,7 +269,7 @@ func hasNamespaceMismatch(canonical map[string]any, profile xapi.Profile) bool {
 	if namespace == "" {
 		return false
 	}
-	if profile == xapi.XPlatformXML4000 {
+	if profile == xapi.XPlatformXML4000 || profile == xapi.XPlatformXML5000 {
 		return namespace != "http://www.tobesoft.com/platform/Dataset"
 	}
 	return namespace != "http://www.nexacroplatform.com/platform/dataset"

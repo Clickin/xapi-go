@@ -67,6 +67,20 @@ func TestXMLProfileNamespaces(t *testing.T) {
 		}
 	}
 }
+
+func TestPublicXPlatformXML5000(t *testing.T) {
+	wire, err := Marshal(fixtureResponse{}, XPlatformXML5000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(wire), `xmlns="http://www.tobesoft.com/platform/dataset"`) || !strings.Contains(string(wire), `ver="5000"`) {
+		t.Fatalf("unexpected XPLATFORM 5000 XML: %s", wire)
+	}
+	var decoded fixtureResponse
+	if err := Unmarshal(wire, &decoded, XPlatformXML5000, WithStrictMode()); err != nil {
+		t.Fatal(err)
+	}
+}
 func TestPublicJSONFixture(t *testing.T) {
 	var out fixtureResponse
 	if e := Unmarshal(fixture(t, "nexacro-json", "official-dataset.json"), &out, NexacroJSON10, WithStrictMode()); e != nil {

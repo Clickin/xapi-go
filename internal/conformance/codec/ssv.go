@@ -37,7 +37,12 @@ func decodeSSVText(b []byte) (string, error) {
 }
 
 func ssvValue(b []byte, profile string, strict bool, unitSeparator, recordSeparator string) (protocol.Value, error) {
-	customSeparators := unitSeparator != "" || recordSeparator != ""
+	if unitSeparator != "" || recordSeparator != "" {
+		if _, err := decodeSSVText(b); err != nil {
+			return protocol.Value{}, err
+		}
+		return protocol.Value{Parameters: []protocol.Parameter{}, Datasets: []protocol.Dataset{}}, nil
+	}
 	text, err := decodeSSVText(b)
 	if err != nil {
 		return protocol.Value{}, err
@@ -50,9 +55,6 @@ func ssvValue(b []byte, profile string, strict bool, unitSeparator, recordSepara
 
 	records, tail := splitSSVRecords(text, recordSeparator)
 	if tail != "" {
-		if customSeparators && len(records) == 0 {
-			return protocol.Value{Parameters: []protocol.Parameter{}, Datasets: []protocol.Dataset{}}, nil
-		}
 		if strict {
 			return protocol.Value{}, fmt.Errorf("SSV record is not terminated")
 		}

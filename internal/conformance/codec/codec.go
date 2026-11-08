@@ -49,7 +49,7 @@ func DecodeProfile(b []byte, profile string, options DecodeOptions) (protocol.Va
 	switch profile {
 	case "nexacro-json-1.0":
 		value, err = jsonValue(b, options.Strict)
-	case "xplatform-xml-4000", "nexacro-xml-4000":
+	case "xplatform-xml-4000", "xplatform-xml-5000", "nexacro-xml-4000":
 		value, err = xmlValue(b, options.Strict, profile)
 	case nexacroSSVProfile, xplatformSSVProfile:
 		value, err = ssvValue(b, profile, options.Strict, options.SSVUnitSeparator, options.SSVRecordSeparator)
@@ -447,16 +447,16 @@ func xmlValue(b []byte, strict bool, profile string) (protocol.Value, error) {
 			rootWire[attribute.Name.Local] = attribute.Value
 		}
 	}
-	if profile == "nexacro-xml-4000" || profile == "xplatform-xml-4000" {
+	if profile == "nexacro-xml-4000" || profile == "xplatform-xml-4000" || profile == "xplatform-xml-5000" {
 		if _, ok := rootWire["namespace"]; !ok {
-			if profile == "xplatform-xml-4000" {
+			if profile == "xplatform-xml-4000" || profile == "xplatform-xml-5000" {
 				rootWire["namespace"] = "http://www.tobesoft.com/platform/Dataset"
 			} else {
 				rootWire["namespace"] = "http://www.nexacroplatform.com/platform/dataset"
 			}
 		}
 		if _, ok := rootWire["version"]; !ok {
-			if profile == "xplatform-xml-4000" {
+			if profile == "xplatform-xml-4000" || profile == "xplatform-xml-5000" {
 				rootWire["version"] = "5000"
 			} else {
 				rootWire["version"] = "4000"
@@ -766,6 +766,8 @@ func xmlNamespace(profile string) string {
 	switch profile {
 	case "xplatform-xml-4000":
 		return "http://www.tobesoft.com/platform/dataset"
+	case "xplatform-xml-5000":
+		return "http://www.tobesoft.com/platform/dataset"
 	case "nexacro-xml-4000":
 		return "http://www.nexacroplatform.com/platform/dataset"
 	default:
@@ -773,27 +775,18 @@ func xmlNamespace(profile string) string {
 	}
 }
 
-// xmlAcceptedNamespace reports whether a decoded root namespace is acceptable
-// for the profile. Decode is intentionally permissive: it accepts both the
-// canonical namespace emitted by Encode and the variant forms the commercial
-// jars emit (tobesoft lowercase "dataset"; nexacro "nexacro.com"). Encode
-// still emits only the canonical form returned by xmlNamespace.
 func xmlAcceptedNamespace(profile, namespace string) bool {
-	accepted := xmlAcceptedNamespaces(profile)
-	if len(accepted) == 0 {
-		return true
-	}
-	for _, value := range accepted {
-		if namespace == value {
+	for _, accepted := range xmlAcceptedNamespaces(profile) {
+		if namespace == accepted {
 			return true
 		}
 	}
-	return false
+	return len(xmlAcceptedNamespaces(profile)) == 0
 }
 
 func xmlAcceptedNamespaces(profile string) []string {
 	switch profile {
-	case "xplatform-xml-4000":
+	case "xplatform-xml-4000", "xplatform-xml-5000":
 		return []string{"http://www.tobesoft.com/platform/Dataset", "http://www.tobesoft.com/platform/dataset"}
 	case "nexacro-xml-4000":
 		return []string{"http://www.nexacroplatform.com/platform/dataset", "http://www.nexacro.com/platform/dataset"}

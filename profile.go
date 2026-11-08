@@ -12,12 +12,15 @@ const (
 	XPlatformSSV
 	NexacroBinary5000
 	XPlatformBinary5000
+	XPlatformXML5000
 )
 
 func (p Profile) String() string {
 	switch p {
 	case XPlatformXML4000:
 		return "xplatform-xml-4000"
+	case XPlatformXML5000:
+		return "xplatform-xml-5000"
 	case NexacroXML4000:
 		return "nexacro-xml-4000"
 	case NexacroJSON10:
@@ -42,13 +45,17 @@ func (p Profile) binary() bool {
 	return p == NexacroBinary5000 || p == XPlatformBinary5000
 }
 func (p Profile) namespace() string {
-	if p == XPlatformXML4000 {
+	switch p {
+	case XPlatformXML4000:
 		return "http://www.tobesoft.com/platform/Dataset"
+	case XPlatformXML5000:
+		return "http://www.tobesoft.com/platform/dataset"
+	default:
+		return "http://www.nexacroplatform.com/platform/dataset"
 	}
-	return "http://www.nexacroplatform.com/platform/dataset"
 }
 func (p Profile) valid() error {
-	if p > XPlatformBinary5000 {
+	if p > XPlatformXML5000 {
 		return fmt.Errorf("xapi: unsupported profile %d", p)
 	}
 	return nil

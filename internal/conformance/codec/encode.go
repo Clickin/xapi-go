@@ -9,7 +9,7 @@ import (
 	"github.com/Clickin/xapi-go/internal/conformance/protocol"
 )
 
-func validateValueTypes(value protocol.Value) error {
+func validateValueTypes(value protocol.Value, allowBinaryTypes bool) error {
 	if value.SaveType == 5 {
 		return fmt.Errorf("saveType 5 is not supported")
 	}
@@ -17,8 +17,8 @@ func validateValueTypes(value protocol.Value) error {
 		return fmt.Errorf("invalid root saveType %d", value.SaveType)
 	}
 	for _, parameter := range value.Parameters {
-		if strings.EqualFold(parameter.Type, "DATASET") || strings.EqualFold(parameter.Type, "INVALID") {
-			return fmt.Errorf("unsupported public XAPI type %q", parameter.Type)
+		if allowBinaryTypes && isInternalType(parameter.Type) || !allowBinaryTypes && (strings.EqualFold(parameter.Type, "DATASET") || strings.EqualFold(parameter.Type, "INVALID")) {
+			return fmt.Errorf("unsupported XAPI type %q", parameter.Type)
 		}
 		if !isKnownType(defaultType(parameter.Type)) {
 			return fmt.Errorf("unsupported parameter type %q", parameter.Type)
@@ -29,16 +29,16 @@ func validateValueTypes(value protocol.Value) error {
 			return fmt.Errorf("invalid Dataset %q saveType %d", dataset.ID, dataset.SaveType)
 		}
 		for _, column := range dataset.Columns {
-			if strings.EqualFold(column.Type, "DATASET") || strings.EqualFold(column.Type, "INVALID") {
-				return fmt.Errorf("unsupported public XAPI type %q", column.Type)
+			if allowBinaryTypes && isInternalType(column.Type) || !allowBinaryTypes && (strings.EqualFold(column.Type, "DATASET") || strings.EqualFold(column.Type, "INVALID")) {
+				return fmt.Errorf("unsupported XAPI type %q", column.Type)
 			}
 			if !isKnownType(defaultType(column.Type)) {
 				return fmt.Errorf("unsupported column type %q", column.Type)
 			}
 		}
 		for _, column := range dataset.ConstColumns {
-			if strings.EqualFold(column.Type, "DATASET") || strings.EqualFold(column.Type, "INVALID") {
-				return fmt.Errorf("unsupported public XAPI type %q", column.Type)
+			if allowBinaryTypes && isInternalType(column.Type) || !allowBinaryTypes && (strings.EqualFold(column.Type, "DATASET") || strings.EqualFold(column.Type, "INVALID")) {
+				return fmt.Errorf("unsupported XAPI type %q", column.Type)
 			}
 			if !isKnownType(defaultType(column.Type)) {
 				return fmt.Errorf("unsupported constant column type %q", column.Type)
@@ -48,6 +48,14 @@ func validateValueTypes(value protocol.Value) error {
 	return nil
 }
 
+func isInternalType(dataType string) bool {
+	switch strings.ToUpper(dataType) {
+	case "UNDEFINED", "NULL", "DATASET", "INVALID":
+		return true
+	default:
+		return false
+	}
+}
 func applySaveTypes(value protocol.Value) protocol.Value {
 	needsFiltering := value.SaveType != 0
 	if !needsFiltering {
@@ -95,7 +103,8 @@ func applySaveTypes(value protocol.Value) protocol.Value {
 }
 
 func Encode(v protocol.Value, profile string) ([]byte, error) {
-	if err := validateValueTypes(v); err != nil {
+	allowBinaryTypes := profile == nexacroBinaryProfile || profile == xplatformBinaryProfile
+	if err := validateValueTypes(v, allowBinaryTypes); err != nil {
 		return nil, err
 	}
 	if err := validateBlobLexicals(v); err != nil {
@@ -106,7 +115,7 @@ func Encode(v protocol.Value, profile string) ([]byte, error) {
 	switch profile {
 	case "nexacro-json-1.0":
 		return json.Marshal(toJSON(v))
-	case "xplatform-xml-4000", "nexacro-xml-4000":
+	case "xplatform-xml-4000", "xplatform-xml-5000", "nexacro-xml-4000":
 		return encodeXML(v, profile)
 	case nexacroSSVProfile, xplatformSSVProfile:
 		return encodeSSV(v, profile)
@@ -146,6 +155,12 @@ func wireType(dataType string) string {
 	}
 }
 
+func jsonSize(size, dataType string) string {
+	if size != "" {
+		return size
+	}
+	return jsonDefaultSize(dataType)
+}
 func jsonDefaultSize(dataType string) string {
 	switch strings.ToUpper(dataType) {
 	case "STRING", "CHAR":
@@ -248,6 +263,16 @@ func orderedJSONRow(rowType string, values map[string]any, columns []protocol.Co
 	return jsonObject(fields)
 }
 
+func jsonRowCell(dataType string, cell protocol.Cell) (any, bool) {
+	if cell.State == "value" {
+		return jsonScalar(dataType, cell), true
+	}
+	if cell.State == "empty" && (strings.EqualFold(dataType, "STRING") || strings.EqualFold(dataType, "CHAR")) {
+		return "", true
+	}
+	return nil, false
+}
+
 func toJSON(v protocol.Value) map[string]any {
 	root := map[string]any{"version": "1.0"}
 	if v.Wire != nil {
@@ -274,20 +299,12 @@ func toJSON(v protocol.Value) map[string]any {
 	for _, d := range v.Datasets {
 		cols := make([]any, 0, len(d.Columns))
 		for _, c := range d.Columns {
-			size := c.Size
-			if size == "" {
-				size = jsonDefaultSize(c.Type)
-			}
-			column := jsonColumn{Size: size, ID: c.ID, Type: wireType(c.Type), Prop: c.Prop, SumText: c.SumText}
+			column := jsonColumn{Size: jsonSize(c.Size, c.Type), ID: c.ID, Type: wireType(c.Type), Prop: c.Prop, SumText: c.SumText}
 			cols = append(cols, column)
 		}
 		consts := make([]any, 0, len(d.ConstColumns))
 		for _, c := range d.ConstColumns {
-			size := c.Size
-			if size == "" {
-				size = jsonDefaultSize(c.Type)
-			}
-			column := jsonColumn{Size: size, ID: c.ID, Type: wireType(c.Type)}
+			column := jsonColumn{Size: jsonSize(c.Size, c.Type), ID: c.ID, Type: wireType(c.Type)}
 			if c.Value.State != "missing" {
 				column.Value = jsonScalar(c.Type, c.Value)
 			}
@@ -308,8 +325,8 @@ func toJSON(v protocol.Value) map[string]any {
 			}
 			values := map[string]any{}
 			for id, c := range r.Values {
-				if c.State == "value" || c.State == "empty" && strings.EqualFold(columnTypes[id], "STRING") {
-					values[id] = jsonScalar(columnTypes[id], c)
+				if value, include := jsonRowCell(columnTypes[id], c); include {
+					values[id] = value
 				}
 			}
 			if r.Type == "I" && len(values) == 0 {
@@ -325,8 +342,8 @@ func toJSON(v protocol.Value) map[string]any {
 			if r.OrgRow != nil && len(d.Columns) > 0 {
 				originalValues := map[string]any{}
 				for id, c := range r.OrgRow.Values {
-					if c.State == "value" {
-						originalValues[id] = jsonScalar(columnTypes[id], c)
+					if value, include := jsonRowCell(columnTypes[id], c); include {
+						originalValues[id] = value
 					}
 				}
 				rows = append(rows, orderedJSONRow("O", originalValues, d.Columns))
@@ -357,7 +374,7 @@ func toJSON(v protocol.Value) map[string]any {
 func encodeXML(value protocol.Value, profile string) ([]byte, error) {
 	namespace := xmlNamespace(profile)
 	versionName, version := "ver", "4000"
-	if profile == "xplatform-xml-4000" {
+	if profile == "xplatform-xml-4000" || profile == "xplatform-xml-5000" {
 		version = "5000"
 	}
 	if root, ok := value.Wire["root"].(map[string]any); ok {
@@ -371,10 +388,8 @@ func encodeXML(value protocol.Value, profile string) ([]byte, error) {
 			versionName, version = "ver", configured
 		}
 	}
-	if profile == "xplatform-xml-4000" {
+	if profile == "xplatform-xml-4000" || profile == "xplatform-xml-5000" {
 		versionName, version = "ver", "5000"
-	}
-	if profile == "xplatform-xml-4000" {
 		namespace = xmlNamespace(profile)
 	}
 
@@ -474,7 +489,7 @@ func writeXMLDataset(out *strings.Builder, dataset protocol.Dataset, profile str
 	out.WriteString(id)
 	out.WriteString(`">`)
 	out.WriteString("\n\t\t<ColumnInfo>")
-	if profile == "xplatform-xml-4000" {
+	if profile == "xplatform-xml-4000" || profile == "xplatform-xml-5000" {
 		for _, column := range dataset.Columns {
 			out.WriteString("\n\t\t\t")
 			if err := writeXMLColumn(out, column); err != nil {
