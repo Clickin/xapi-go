@@ -205,23 +205,6 @@ func TestControlEntityEncode(t *testing.T) {
 	}
 }
 
-func TestControlEntityWriterHandlesSplitMarker(t *testing.T) {
-	var b bytes.Buffer
-	w := &controlEntityWriter{w: &b}
-	if _, err := w.Write([]byte{0xee}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := w.Write([]byte{0x80, 0x81}); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.Flush(); err != nil {
-		t.Fatal(err)
-	}
-	if b.String() != "&#1;" {
-		t.Fatalf("split marker output: %q", b.String())
-	}
-}
-
 func TestTrackedRowsUseTypedCurrent(t *testing.T) {
 	type request struct {
 		Users []Tracked[testUser] `xapi:"dataset=users"`
@@ -481,7 +464,7 @@ func TestXMLParameterValueAttributeCompatibility(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(wire), `version="4000"`) || !strings.Contains(string(wire), `id="code" type="int" value="8"`) || !strings.Contains(string(wire), `<Parameter id="blob" type="blob">`) {
+	if !strings.Contains(string(wire), `version="4000"`) || !strings.Contains(string(wire), `id="code" type="int" value="8"`) || !strings.Contains(string(wire), `<Parameter id="blob" type="blob" encrypt="base64">`) {
 		t.Fatalf("unexpected attribute-mode XML: %s", wire)
 	}
 	var round response

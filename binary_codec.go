@@ -421,7 +421,7 @@ func binaryCell(v binaryValue, typ string) (string, string) {
 		return "value", strconv.FormatInt(int64(x), 10)
 	case float64:
 		if v.tag == 41 {
-			return "value", strconv.FormatInt(int64(x), 10)
+			return "value", formatBinaryEpoch(int64(x), typ)
 		}
 		return "value", strconv.FormatFloat(x, 'g', -1, 64)
 	default:
@@ -665,17 +665,70 @@ func binaryRowCode(t RowType) uint16 {
 		return 1
 	}
 }
+
+// parseBinaryEpoch reads a date lexical (yyyyMMddHHmmssSSS, yyyyMMddHHmmss,
+// yyyyMMdd, HHmmssSSS or HHmmss) as UTC epoch milliseconds, which is how
+// PlatformBinary carries every date type.
 func parseBinaryEpoch(s string) (int64, error) {
 	s = strings.TrimSpace(s)
-	if n, e := strconv.ParseInt(s, 10, 64); e == nil {
-		return n, nil
+	field := func(from, to int) (int, bool) {
+		n, err := strconv.Atoi(s[from:to])
+		return n, err == nil
 	}
-	for _, layout := range []string{"20060102150405000", "20060102150405", "20060102", "150405000", "150405", time.RFC3339Nano} {
-		if t, e := time.ParseInLocation(layout, s, time.UTC); e == nil {
-			return t.UnixMilli(), nil
+	year, month, day, hour, minute, second, millis := 1970, 1, 1, 0, 0, 0, 0
+	ok := true
+	set := func(dst *int, from, to int) {
+		if n, good := field(from, to); good {
+			*dst = n
+		} else {
+			ok = false
 		}
 	}
-	return 0, fmt.Errorf("xapi: invalid PlatformBinary time %q", s)
+	switch len(s) {
+	case 17, 14, 8:
+		set(&year, 0, 4)
+		set(&month, 4, 6)
+		set(&day, 6, 8)
+		if len(s) >= 14 {
+			set(&hour, 8, 10)
+			set(&minute, 10, 12)
+			set(&second, 12, 14)
+		}
+		if len(s) == 17 {
+			set(&millis, 14, 17)
+		}
+	case 9, 6:
+		set(&hour, 0, 2)
+		set(&minute, 2, 4)
+		set(&second, 4, 6)
+		if len(s) == 9 {
+			set(&millis, 6, 9)
+		}
+	default:
+		ok = false
+	}
+	if !ok {
+		if t, e := time.Parse(time.RFC3339Nano, s); e == nil {
+			return t.UnixMilli(), nil
+		}
+		return 0, fmt.Errorf("xapi: invalid PlatformBinary time %q", s)
+	}
+	return time.Date(year, time.Month(month), day, hour, minute, second, millis*int(time.Millisecond), time.UTC).UnixMilli(), nil
+}
+
+// formatBinaryEpoch writes UTC epoch milliseconds as the lexical of the
+// date type.
+func formatBinaryEpoch(ms int64, typ string) string {
+	t := time.UnixMilli(ms).UTC()
+	millis := fmt.Sprintf("%03d", t.Nanosecond()/int(time.Millisecond))
+	switch strings.ToUpper(typ) {
+	case "DATE":
+		return t.Format("20060102")
+	case "TIME":
+		return t.Format("150405") + millis
+	default:
+		return t.Format("20060102150405") + millis
+	}
 }
 func writeU16(b *bytes.Buffer, n uint16) {
 	var x [2]byte

@@ -38,6 +38,18 @@ if err := codec.Decode(r, &response); err != nil {
 }
 ```
 
+XML encoder는 원본 XPLATFORM/Nexacro driver와 같은 byte를 씁니다. UTF-8
+선언, tab 들여쓰기, driver escape(XPLATFORM은 공백과 제어 문자를 `&#N;`로 씀),
+type별 기본 `size`, BLOB의 `encrypt="base64"`를 따르고, 숫자·날짜 lexical은
+driver의 변환 규칙으로 정규화합니다. Java int/long 범위를 넘는 UINT/ULONG 값은
+driver처럼 0으로 쓰입니다. Row는 driver의 saveType ALL과 같이 씁니다. row type을
+유지하고, update row에는 원본 행을 붙이며, delete row는 Dataset 끝에 둡니다.
+
+`Profile`의 zero value는 `XPlatformXML5000`
+(`xmlns="http://www.tobesoft.com/platform/dataset" ver="5000"`)입니다.
+`XPlatformXML4000`은 이전 root(`.../Dataset`, `ver="4000"`)를 명시적으로 쓸 때만
+사용합니다.
+
 XML legacy 변형은 `WithXMLParameterValueAttribute()`와
 `WithXMLVersionAttribute()`로 명시적으로 출력할 수 있으며, decoder는 두 Parameter
 표현과 `ver`/`version` root attribute를 모두 읽습니다.

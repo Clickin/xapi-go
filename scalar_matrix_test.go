@@ -38,7 +38,9 @@ type extendedIntegerMatrix struct {
 }
 
 func TestExtendedIntegerWireTypesRoundTrip(t *testing.T) {
-	in := extendedIntegerMatrix{Short: -2, UInt: ^uint32(0), ULong: ^uint64(0)}
+	// The drivers have no unsigned types: UINT is written as int and ULONG as
+	// bigdecimal through a Java long, so values past those ranges become 0.
+	in := extendedIntegerMatrix{Short: -2, UInt: 1<<31 - 1, ULong: 1<<63 - 1}
 	for _, p := range []Profile{XPlatformXML4000, NexacroXML4000, NexacroJSON10} {
 		b, err := Marshal(in, p)
 		if err != nil {

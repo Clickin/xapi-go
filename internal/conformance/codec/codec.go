@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"sort"
 	"strings"
 
 	"github.com/Clickin/xapi-go/internal/conformance/protocol"
@@ -50,7 +49,7 @@ func DecodeProfile(b []byte, profile string, options DecodeOptions) (protocol.Va
 	switch profile {
 	case "nexacro-json-1.0":
 		value, err = jsonValue(b, options.Strict)
-	case "xplatform-xml-4000", "xplatform-xml-5000", "nexacro-xml-4000":
+	case "xplatform-xml-5000", "nexacro-xml-4000":
 		value, err = xmlValue(b, options.Strict, profile)
 	case nexacroSSVProfile, xplatformSSVProfile:
 		value, err = ssvValue(b, profile, options.Strict, options.SSVUnitSeparator, options.SSVRecordSeparator)
@@ -63,13 +62,69 @@ func DecodeProfile(b []byte, profile string, options DecodeOptions) (protocol.Va
 }
 
 func validateDecodedValue(value protocol.Value, decodeErr error, strict bool) (protocol.Value, error) {
-	if decodeErr != nil || !strict {
+	if decodeErr != nil {
 		return value, decodeErr
 	}
-	if err := validateBlobLexicals(value); err != nil {
-		return protocol.Value{}, err
+	return finishDecodedValue(value), nil
+}
+
+// finishDecodedValue applies what every driver decode shares. Deleted rows go
+// to the driver's removed-row list, so they come after all live rows whatever
+// their wire position. Every "empty" or "value" cell carries its lexical, even
+// when that lexical is "".
+func finishDecodedValue(value protocol.Value) protocol.Value {
+	mark := func(cell protocol.Cell) protocol.Cell {
+		if cell.State == "empty" || cell.State == "value" {
+			cell.MarkLexicalPresent()
+		}
+		return cell
 	}
-	return value, nil
+	markAll := func(values map[string]protocol.Cell) {
+		for id, cell := range values {
+			values[id] = mark(cell)
+		}
+	}
+	for i := range value.Parameters {
+		if value.Parameters[i].State == "empty" || value.Parameters[i].State == "value" {
+			value.Parameters[i].MarkLexicalPresent()
+		}
+	}
+	for di := range value.Datasets {
+		dataset := &value.Datasets[di]
+		for ci := range dataset.ConstColumns {
+			if dataset.ConstColumns[ci].Value.State != "" {
+				dataset.ConstColumns[ci].Value = mark(dataset.ConstColumns[ci].Value)
+			}
+		}
+		live := make([]protocol.Row, 0, len(dataset.Rows))
+		var removed []protocol.Row
+		for _, row := range dataset.Rows {
+			markAll(row.Values)
+			if row.OrgRow != nil {
+				markAll(row.OrgRow.Values)
+				// The drivers report a saved row holding only nulls as no
+				// saved row.
+				meaningful := false
+				for _, cell := range row.OrgRow.Values {
+					if cell.State != "null" && cell.State != "missing" {
+						meaningful = true
+					}
+				}
+				if !meaningful {
+					row.OrgRow = nil
+				}
+			}
+			if row.Type == "D" {
+				removed = append(removed, row)
+			} else {
+				live = append(live, row)
+			}
+		}
+		if len(dataset.Rows) > 0 {
+			dataset.Rows = append(live, removed...)
+		}
+	}
+	return value
 }
 
 func validateBlobLexicals(value protocol.Value) error {
@@ -136,14 +191,16 @@ func jsonValue(b []byte, strict bool) (protocol.Value, error) {
 	if err := json.Unmarshal(b, &root); err != nil {
 		return protocol.Value{}, err
 	}
-	out := protocol.Value{Parameters: []protocol.Parameter{}, Datasets: []protocol.Dataset{}, Wire: map[string]any{"version": "1.0"}}
-	var version string
-	versionRaw, hasVersion := root["version"]
-	if hasVersion {
+	out := protocol.Value{
+		Parameters: []protocol.Parameter{},
+		Datasets:   []protocol.Dataset{},
+		Wire:       map[string]any{"version": "1.0"},
+	}
+	if versionRaw, ok := root["version"]; ok {
+		var version string
 		if err := json.Unmarshal(versionRaw, &version); err != nil {
 			return out, fmt.Errorf("version must be a string")
 		}
-		out.Wire["version"] = version
 	}
 	if raw, ok := root["Parameters"]; ok {
 		if err := parseJSONParameters(raw, &out.Parameters, strict); err != nil {
@@ -158,18 +215,19 @@ func jsonValue(b []byte, strict bool) (protocol.Value, error) {
 	}
 	for _, d := range datasets {
 		ds := protocol.Dataset{Columns: []protocol.Column{}, ConstColumns: []protocol.ConstColumn{}, Rows: []protocol.Row{}}
-		if err := json.Unmarshal(d["id"], &ds.ID); err != nil || strict && ds.ID == "" {
+		if err := json.Unmarshal(d["id"], &ds.ID); err != nil || ds.ID == "" {
 			return out, fmt.Errorf("Dataset.id is required")
 		}
-		columnInfo, hasColumnInfo := d["ColumnInfo"]
-		if hasColumnInfo {
-			if err := parseJSONColumns(columnInfo, &ds, strict); err != nil {
+		constValues := map[string]protocol.Cell{}
+		if columnInfo, ok := d["ColumnInfo"]; ok {
+			var err error
+			constValues, err = parseJSONColumns(columnInfo, &ds, strict)
+			if err != nil {
 				return out, err
 			}
 		}
-		rowsRaw, hasRows := d["Rows"]
 		var rows []map[string]json.RawMessage
-		if hasRows {
+		if rowsRaw, ok := d["Rows"]; ok {
 			if err := json.Unmarshal(rowsRaw, &rows); err != nil {
 				return out, fmt.Errorf("Dataset.Rows must be an array: %w", err)
 			}
@@ -187,28 +245,32 @@ func jsonValue(b []byte, strict bool) (protocol.Value, error) {
 				}
 				continue
 			}
-			for _, c := range ds.Columns {
-				cell := jsonWireCell(r[c.ID], c.Type)
-				if len(r[c.ID]) == 0 {
-					cell.State = "null"
-					cell.Lexical = ""
-				}
-				row.Values[c.ID] = cell
-			}
-			for _, c := range ds.ConstColumns {
-				cell := c.Value
-				if cell.State == "missing" {
-					cell.State = "null"
-				}
-				row.Values[c.ID] = cell
-			}
 			if row.Type == "O" {
 				if len(ds.Rows) == 0 || ds.Rows[len(ds.Rows)-1].Type != "U" {
-					return out, fmt.Errorf("invalid original row placement")
+					if strict {
+						return out, fmt.Errorf("orphan original row")
+					}
+					continue
 				}
-				ds.Rows[len(ds.Rows)-1].OrgRow = &row
+				original := protocol.Row{Type: "O", Values: map[string]protocol.Cell{}}
+				for _, column := range ds.Columns {
+					original.Values[column.ID] = jsonCell(r[column.ID], column.Type)
+				}
+				for _, column := range ds.ConstColumns {
+					original.Values[column.ID] = constValues[column.ID]
+				}
+				original.MarkOrgRowPresent()
+				ds.Rows[len(ds.Rows)-1].OrgRow = &original
+				ds.Rows[len(ds.Rows)-1].MarkOrgRowPresent()
 				continue
 			}
+			for _, column := range ds.Columns {
+				row.Values[column.ID] = jsonCell(r[column.ID], column.Type)
+			}
+			for _, column := range ds.ConstColumns {
+				row.Values[column.ID] = constValues[column.ID]
+			}
+			row.MarkOrgRowPresent()
 			ds.Rows = append(ds.Rows, row)
 		}
 		out.Datasets = append(out.Datasets, ds)
@@ -223,63 +285,76 @@ func parseJSONParameters(raw json.RawMessage, out *[]protocol.Parameter, strict 
 	}
 	for _, item := range parameters {
 		var parameter protocol.Parameter
-		if err := json.Unmarshal(item["id"], &parameter.ID); err != nil || strict && parameter.ID == "" {
+		if err := json.Unmarshal(item["id"], &parameter.ID); err != nil || parameter.ID == "" {
 			return fmt.Errorf("Parameter.id is required")
 		}
 		_ = json.Unmarshal(item["type"], &parameter.Type)
 		if parameter.Type == "" {
 			parameter.Type = inferJSONType(item["value"])
 		}
-		parameter.Type = strings.ToUpper(parameter.Type)
-		if !isKnownType(parameter.Type) {
-			parameter.Type = "UNDEFINED"
-		}
+		parameter.Type = normalizeDecodedType(parameter.Type, "STRING")
 		if value, ok := item["value"]; ok {
 			parameter.State, parameter.Lexical = rawState(value)
-			if strings.EqualFold(parameter.Type, "BLOB") || strings.EqualFold(parameter.Type, "FILE") {
-				if parameter.State == "value" || parameter.State == "empty" {
-					parameter.Lexical = base64.StdEncoding.EncodeToString([]byte(parameter.Lexical))
-				}
-			}
 		} else {
 			parameter.State = "null"
+		}
+		if parameter.Type == "UNDEFINED" && parameter.State != "null" {
+			// Variable.set(String) gives an untyped variable the string type;
+			// a null value is never set, so the type stays undefined.
+			parameter.Type = "STRING"
+		}
+		cell := protocol.Cell{State: parameter.State, Lexical: parameter.Lexical}
+		if isBlobType(parameter.Type) {
+			cell = textBlobCell(cell)
+		} else {
+			cell = normalizeXMLCell(cell, parameter.Type)
+		}
+		parameter.State, parameter.Lexical = cell.State, cell.Lexical
+		if parameter.State == "empty" {
+			parameter.MarkLexicalPresent()
 		}
 		*out = append(*out, parameter)
 	}
 	return nil
 }
 
-func parseJSONColumns(raw json.RawMessage, dataset *protocol.Dataset, strict bool) error {
+func parseJSONColumns(raw json.RawMessage, dataset *protocol.Dataset, strict bool) (map[string]protocol.Cell, error) {
 	var info map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &info); err != nil {
-		return fmt.Errorf("ColumnInfo must be an object: %w", err)
+		return nil, fmt.Errorf("ColumnInfo must be an object: %w", err)
 	}
-	columnsRaw, hasColumns := info["Column"]
-	if hasColumns {
-		if err := parseJSONColumnArray(columnsRaw, dataset, false, strict); err != nil {
-			return err
+	constValues := map[string]protocol.Cell{}
+	if columnsRaw, ok := info["Column"]; ok {
+		if err := parseJSONColumnArray(columnsRaw, dataset, false, nil); err != nil {
+			return nil, err
 		}
 	}
 	if constantsRaw, ok := info["ConstColumn"]; ok {
-		if err := parseJSONColumnArray(constantsRaw, dataset, true, strict); err != nil {
-			return err
+		if err := parseJSONColumnArray(constantsRaw, dataset, true, constValues); err != nil {
+			return nil, err
 		}
 	}
-	return nil
+	return constValues, nil
 }
 
-func parseJSONColumnArray(raw json.RawMessage, dataset *protocol.Dataset, isConst, strict bool) error {
+func parseJSONColumnArray(raw json.RawMessage, dataset *protocol.Dataset, isConst bool, constValues map[string]protocol.Cell) error {
 	var items []map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &items); err != nil {
 		return fmt.Errorf("column list must be an array: %w", err)
 	}
 	for _, item := range items {
-		var id, dataType, encoding, prop, sumText string
-		_ = json.Unmarshal(item["type"], &dataType)
-		size := rawScalarString(item["size"])
+		var id, dataType string
 		_ = json.Unmarshal(item["id"], &id)
-		if strict && id == "" {
+		if id == "" {
 			return fmt.Errorf("column id is required")
+		}
+		_ = json.Unmarshal(item["type"], &dataType)
+		if size, ok := item["size"]; ok {
+			// The driver reads size as a JSON string and rejects a number.
+			var text string
+			if json.Unmarshal(size, &text) != nil {
+				return fmt.Errorf("column %q size must be a string", id)
+			}
 		}
 		if dataType == "" {
 			if isConst {
@@ -288,39 +363,35 @@ func parseJSONColumnArray(raw json.RawMessage, dataset *protocol.Dataset, isCons
 				dataType = "STRING"
 			}
 		}
-		dataType = strings.ToUpper(dataType)
-		if dataType == "FLOAT" {
-			dataType = "DOUBLE"
-		}
-		if dataType == "DECIMAL" {
-			dataType = "UNDEFINED"
-		}
-		if !isKnownType(dataType) {
-			dataType = "UNDEFINED"
-		}
+		dataType = normalizeDecodedType(dataType, "STRING")
 		if isConst {
-			dataset.ConstColumns = append(dataset.ConstColumns, protocol.ConstColumn{ID: id, Type: dataType, Index: len(dataset.ConstColumns), Size: size, Encoding: encoding, Value: jsonWireCell(item["value"], dataType)})
+			index := len(dataset.Columns) + len(dataset.ConstColumns)
+			dataset.ConstColumns = append(dataset.ConstColumns, protocol.ConstColumn{ID: id, Type: dataType, Index: index})
+			// The JSON reader stores the constant value string as is, unlike
+			// the XML reader, which converts it to the column type.
+			constValues[id] = rawCell(item["value"])
 		} else {
-			dataset.Columns = append(dataset.Columns, protocol.Column{ID: id, Type: dataType, Size: size, Encoding: encoding, Prop: prop, SumText: sumText, Index: len(dataset.Columns)})
+			dataset.Columns = append(dataset.Columns, protocol.Column{ID: id, Type: dataType, Index: len(dataset.Columns)})
 		}
 	}
 	return nil
 }
 
 func inferJSONType(raw json.RawMessage) string {
-	if len(raw) == 0 || raw[0] == '"' || string(raw) == "null" {
-		return "STRING"
-	}
-	var number json.Number
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	if decoder.Decode(&number) == nil {
-		if strings.ContainsAny(number.String(), ".eE") {
-			return "FLOAT"
-		}
-		return "INT"
-	}
 	return "STRING"
+}
+func normalizeDecodedType(dataType, missingDefault string) string {
+	dataType = strings.ToUpper(dataType)
+	if dataType == "" {
+		dataType = missingDefault
+	}
+	if dataType == "FLOAT" {
+		return "DOUBLE"
+	}
+	if dataType == "DECIMAL" || !isKnownType(dataType) {
+		return "UNDEFINED"
+	}
+	return dataType
 }
 
 func rawScalarString(raw json.RawMessage) string {
@@ -335,18 +406,20 @@ func rawScalarString(raw json.RawMessage) string {
 }
 func rawCell(raw json.RawMessage) protocol.Cell {
 	if len(raw) == 0 {
-		return protocol.Cell{State: "missing"}
+		return protocol.Cell{State: "null"}
 	}
-	s, v := rawState(raw)
-	return protocol.Cell{State: s, Lexical: v}
-}
-func jsonWireCell(raw json.RawMessage, dataType string) protocol.Cell {
-	cell := rawCell(raw)
-	if (strings.EqualFold(dataType, "BLOB") || strings.EqualFold(dataType, "FILE")) &&
-		(cell.State == "value" || cell.State == "empty") {
-		cell.Lexical = base64.StdEncoding.EncodeToString([]byte(cell.Lexical))
+	state, lexical := rawState(raw)
+	cell := protocol.Cell{State: state, Lexical: lexical}
+	if state == "empty" {
+		cell.MarkLexicalPresent()
 	}
 	return cell
+}
+
+// jsonCell converts a column value as the driver's typed setter does; BLOB
+// column text is base64-decoded (see normalizeXMLCell).
+func jsonCell(raw json.RawMessage, dataType string) protocol.Cell {
+	return normalizeXMLCell(rawCell(raw), strings.ToUpper(dataType))
 }
 func rawState(raw json.RawMessage) (string, string) {
 	if string(raw) == "null" {
@@ -368,8 +441,10 @@ type xroot struct {
 	Parameters struct {
 		Items []xparam
 	}
-	DirectDatasets  []xdataset
-	WrappedDatasets []xdataset
+	Datasets struct {
+		Items []xdataset
+	}
+	DirectDatasets []xdataset
 }
 type xparam struct {
 	Attr []xmltext.Attr
@@ -411,15 +486,16 @@ type xcolvalue struct {
 
 type xmlSyntax struct {
 	ParameterSelfClosing []bool
-	ConstAfterColumn     bool
+	DatasetColumnIndexes []map[string]int
+	DatasetIDs           []string
 }
 
 func xmlValue(b []byte, strict bool, profile string) (protocol.Value, error) {
 	if bytes.Contains(bytes.ToUpper(b), []byte("<!DOCTYPE")) {
 		return protocol.Value{}, fmt.Errorf("DTD and external entities are forbidden")
 	}
-	if strict && len(b) > 0 && (b[0] == ' ' || b[0] == '\n' || b[0] == '\r' || b[0] == '\t') {
-		return protocol.Value{}, fmt.Errorf("XML must not have leading whitespace")
+	if declaration := bytes.Index(b, []byte("<?xml")); declaration > 0 {
+		return protocol.Value{}, fmt.Errorf("XML declaration must be the first bytes")
 	}
 	if err := rejectDuplicateXMLAttrs(b); err != nil {
 		return protocol.Value{}, err
@@ -428,9 +504,6 @@ func xmlValue(b []byte, strict bool, profile string) (protocol.Value, error) {
 	if err != nil {
 		return protocol.Value{}, err
 	}
-	if before, after := bytes.Index(b, []byte("<Column ")), bytes.Index(b, []byte("<ConstColumn ")); before >= 0 && after > before {
-		syntax.ConstAfterColumn = true
-	}
 	root, err := parseXRoot(b)
 	if err != nil {
 		return protocol.Value{}, err
@@ -438,27 +511,21 @@ func xmlValue(b []byte, strict bool, profile string) (protocol.Value, error) {
 
 	out := protocol.Value{Parameters: []protocol.Parameter{}, Datasets: []protocol.Dataset{}}
 	rootWire := map[string]any{}
-	if root.XMLName.Space != "" {
-		rootWire["namespace"] = root.XMLName.Space
-	}
-	for _, attribute := range root.Attr {
-		if attribute.Name.Local == "version" || attribute.Name.Local == "ver" {
-			rootWire[attribute.Name.Local] = attribute.Value
+	if namespace := xmlNamespace(profile); namespace != "" {
+		rootWire["namespace"] = namespace
+		switch profile {
+		case "nexacro-xml-4000":
+			rootWire["version"] = "4000"
+		case "xplatform-xml-5000":
+			rootWire["ver"] = "5000"
 		}
-	}
-	if profile == "nexacro-xml-4000" || profile == "xplatform-xml-4000" || profile == "xplatform-xml-5000" {
-		if _, ok := rootWire["namespace"]; !ok {
-			if profile == "xplatform-xml-4000" || profile == "xplatform-xml-5000" {
-				rootWire["namespace"] = "http://www.tobesoft.com/platform/Dataset"
-			} else {
-				rootWire["namespace"] = "http://www.nexacroplatform.com/platform/dataset"
-			}
+	} else {
+		if root.XMLName.Space != "" {
+			rootWire["namespace"] = root.XMLName.Space
 		}
-		if _, ok := rootWire["version"]; !ok {
-			if profile == "xplatform-xml-4000" || profile == "xplatform-xml-5000" {
-				rootWire["version"] = "5000"
-			} else {
-				rootWire["version"] = "4000"
+		for _, attribute := range root.Attr {
+			if attribute.Name.Local == "version" || attribute.Name.Local == "ver" {
+				rootWire[attribute.Name.Local] = attribute.Value
 			}
 		}
 	}
@@ -467,144 +534,81 @@ func xmlValue(b []byte, strict bool, profile string) (protocol.Value, error) {
 	}
 
 	for _, item := range root.Parameters.Items {
-		id, dataType, attributeValue := "", "", ""
-		hasAttributeValue := false
+		id, dataType := "", ""
 		for _, attribute := range item.Attr {
 			switch attribute.Name.Local {
 			case "id":
 				id = attribute.Value
 			case "type":
 				dataType = attribute.Value
-			case "value":
-				attributeValue = attribute.Value
-				hasAttributeValue = true
 			}
 		}
 		if id == "" {
 			return protocol.Value{}, fmt.Errorf("Parameter.id is required")
 		}
-		lexical, form := item.Text, "text"
-		if hasAttributeValue {
-			lexical, form = attributeValue, "attribute"
-			if !strict {
-				lexical = item.Text // a non-strict decode ignores the attribute
-			}
+		dataType = normalizeDecodedParameterType(dataType)
+		cell := normalizeXMLCell(xmlCell(item.Text), dataType)
+		if isBlobType(dataType) {
+			cell = textBlobCell(xmlCell(item.Text))
 		}
-		if dataType == "" {
-			dataType = "STRING"
+		parameter := protocol.Parameter{
+			ID: id, Type: dataType, State: cell.State, Lexical: cell.Lexical,
 		}
-		if strings.EqualFold(dataType, "FLOAT") {
-			dataType = "DOUBLE"
+		if cell.State == "empty" {
+			parameter.MarkLexicalPresent()
 		}
-		if strings.EqualFold(dataType, "DECIMAL") {
-			dataType = "STRING"
-		}
-		lexical = normalizeXMLLexical(dataType, lexical)
-		cell := xmlTypedCell(dataType, lexical)
-		out.Parameters = append(out.Parameters, protocol.Parameter{
-			ID: id, Type: strings.ToUpper(dataType), State: cell.State, Lexical: cell.Lexical,
-			Wire: map[string]any{"valueForm": form},
-		})
+		out.Parameters = append(out.Parameters, parameter)
 	}
-	wrapped := bytes.Index(b, []byte("<Datasets"))
-	direct := bytes.Index(b, []byte("<Dataset "))
-	if wrapped >= 0 && (direct < 0 || wrapped < direct) {
-		datasets := append(root.WrappedDatasets, root.DirectDatasets...)
-		root.WrappedDatasets = datasets
-		root.DirectDatasets = nil
-	}
-	datasets := append(root.DirectDatasets, root.WrappedDatasets...)
-	order := xmlDatasetOrder(b)
-	sort.SliceStable(datasets, func(i, j int) bool { return order[datasets[i].ID] < order[datasets[j].ID] })
-	for _, item := range datasets {
+
+	datasets := append(append([]xdataset{}, root.DirectDatasets...), root.Datasets.Items...)
+	datasets = orderXMLDatasets(datasets, syntax.DatasetIDs)
+	for datasetIndex, item := range datasets {
 		if item.ID == "" {
 			return protocol.Value{}, fmt.Errorf("Dataset.id is required")
 		}
 		dataset := protocol.Dataset{ID: item.ID, Columns: []protocol.Column{}, ConstColumns: []protocol.ConstColumn{}, Rows: []protocol.Row{}}
+		constValues := map[string]protocol.Cell{}
+		wireTypes := map[string]string{}
 		for i, column := range item.Columns.Items {
-			if strict && column.ID == "" {
+			if column.ID == "" {
 				return protocol.Value{}, fmt.Errorf("Column.id is required")
 			}
-			dataType := strings.ToUpper(column.Type)
-			if dataType == "" {
-				dataType = "UNDEFINED"
-			}
-			if dataType == "FLOAT" {
-				dataType = "DOUBLE"
-			}
-			if dataType == "DECIMAL" {
-				dataType = "UNDEFINED"
-			}
-			if !isKnownType(dataType) {
-				dataType = "UNDEFINED"
-			}
-			encoding := column.Encoding
-			if encoding == "" {
-				encoding = column.Encrypt
-			}
-			dataset.Columns = append(dataset.Columns, protocol.Column{
-				ID: column.ID, Type: dataType, Size: column.Size, Encoding: strings.ToLower(encoding),
-				Prop: column.Prop, SumText: column.SumText, Index: func() int {
-					if syntax.ConstAfterColumn {
-						return i
-					}
-					return len(item.Columns.Consts) + i
-				}(),
-			})
+			wireTypes[column.ID] = strings.ToUpper(column.Type)
+			dataType := normalizeDecodedType(column.Type, "UNDEFINED")
+			index := xmlColumnIndex(syntax, datasetIndex, "Column", column.ID, len(item.Columns.Consts)+i)
+			dataset.Columns = append(dataset.Columns, protocol.Column{ID: column.ID, Type: dataType, Index: index})
 		}
 		for i, column := range item.Columns.Consts {
-			dataType := strings.ToUpper(column.Type)
-			if dataType == "" {
-				dataType = "UNDEFINED"
-			}
-			if dataType == "FLOAT" {
-				dataType = "DOUBLE"
-			}
-			if dataType == "DECIMAL" {
-				dataType = "UNDEFINED"
-			}
-			if !isKnownType(dataType) {
-				dataType = "UNDEFINED"
-			}
-			if strict && column.ID == "" {
+			if column.ID == "" {
 				return protocol.Value{}, fmt.Errorf("ConstColumn.id is required")
 			}
-			encoding := column.Encoding
-			if encoding == "" {
-				encoding = column.Encrypt
-			}
+			dataType := normalizeDecodedType(column.Type, "UNDEFINED")
+			index := xmlColumnIndex(syntax, datasetIndex, "ConstColumn", column.ID, i)
+			dataset.ConstColumns = append(dataset.ConstColumns, protocol.ConstColumn{ID: column.ID, Type: dataType, Index: index})
 			value := protocol.Cell{State: "null"}
-			if column.Value != nil {
-				value.State, value.Lexical = "value", *column.Value
-				if *column.Value == "" {
-					value.State = "empty"
-				}
+			// The drivers fail on a BLOB constant without a value attribute,
+			// which they write themselves for a null BLOB constant.
+			if column.Value == nil && strings.EqualFold(dataType, "BLOB") {
+				return protocol.Value{}, fmt.Errorf("BLOB ConstColumn %q has no value", column.ID)
 			}
-			dataset.ConstColumns = append(dataset.ConstColumns, protocol.ConstColumn{
-				ID: column.ID, Type: dataType, Index: func() int {
-					if syntax.ConstAfterColumn {
-						return len(item.Columns.Items) + i
-					}
-					return i
-				}(), Size: column.Size, Encoding: strings.ToLower(encoding), Value: value,
-			})
+			if column.Value != nil {
+				value = normalizeXMLCell(xmlCell(*column.Value), strings.ToUpper(column.Type))
+			}
+			constValues[column.ID] = value
+			wireTypes[column.ID] = strings.ToUpper(column.Type)
 		}
 		known := map[string]bool{}
 		for _, column := range dataset.Columns {
 			known[column.ID] = true
 		}
+		for _, column := range dataset.ConstColumns {
+			known[column.ID] = true
+		}
 		for _, itemRow := range item.Rows.Items {
-			if itemRow.Org == nil && itemRow.OrgUnderscore != nil {
-				itemRow.Cols = itemRow.OrgUnderscore.Cols
-			}
 			for _, cell := range itemRow.Cols {
 				if !known[cell.ID] {
 					return protocol.Value{}, fmt.Errorf("column %q is not declared", cell.ID)
 				}
-			}
-			isUpdate := strings.EqualFold(itemRow.Type, "update")
-			if itemRow.Org != nil && !isUpdate {
-				itemRow.Org = nil
 			}
 			if itemRow.Org != nil {
 				for _, cell := range itemRow.Org.Cols {
@@ -613,73 +617,28 @@ func xmlValue(b []byte, strict bool, profile string) (protocol.Value, error) {
 					}
 				}
 			}
-			if strict && itemRow.OrgUnderscore == nil && isUpdate != (itemRow.Org != nil) {
-				return protocol.Value{}, fmt.Errorf("OrgRow is required only for update rows")
+			if itemRow.OrgUnderscore != nil {
+				for _, cell := range itemRow.OrgUnderscore.Cols {
+					if !known[cell.ID] {
+						return protocol.Value{}, fmt.Errorf("org column %q is not declared", cell.ID)
+					}
+				}
 			}
-			dataset.Rows = append(dataset.Rows, xmlRow(itemRow, dataset.Columns, dataset.ConstColumns))
+			row := xmlRow(itemRow, dataset.Columns, constValues, wireTypes)
+			row.MarkOrgRowPresent()
+			dataset.Rows = append(dataset.Rows, row)
 		}
 		out.Datasets = append(out.Datasets, dataset)
 	}
 	return out, nil
 }
 
-func xmlDatasetOrder(b []byte) map[string]int {
-	order := map[string]int{}
-	for index := 0; ; index++ {
-		start := bytes.Index(b, []byte("<Dataset"))
-		if start < 0 {
-			return order
-		}
-		b = b[start+len("<Dataset"):]
-		idStart := bytes.Index(b, []byte(`id="`))
-		if idStart < 0 {
-			continue
-		}
-		b = b[idStart+4:]
-		idEnd := bytes.IndexByte(b, '"')
-		if idEnd < 0 {
-			return order
-		}
-		id := string(b[:idEnd])
-		if _, exists := order[id]; !exists {
-			order[id] = index
-		}
-		b = b[idEnd+1:]
-	}
-}
-
 func validateXMLStructure(b []byte, strict bool, profile string) (xmlSyntax, error) {
-	allowed := map[string]map[string]bool{
-		"Root":       {"Parameters": true, "Dataset": true, "Datasets": true},
-		"Datasets":   {"Dataset": true},
-		"Parameters": {"Parameter": true},
-		"Dataset":    {"ColumnInfo": true, "Rows": true},
-		"ColumnInfo": {"Column": true, "ConstColumn": true},
-		"Rows":       {"Row": true},
-		"Row":        {"Col": true, "OrgRow": true, "Org_Row": true},
-		"OrgRow":     {"Col": true},
-		"Org_Row":    {"Col": true},
-	}
-	allowedAttributes := map[string]map[string]bool{
-		"Root":        {"xmlns": true, "ver": true, "version": true},
-		"Parameter":   {"id": true, "type": true, "value": true, "enc": true, "encrypt": true},
-		"Dataset":     {"id": true},
-		"Column":      {"id": true, "type": true, "size": true, "enc": true, "encrypt": true, "prop": true, "sumtext": true},
-		"ConstColumn": {"id": true, "type": true, "size": true, "enc": true, "encrypt": true, "value": true},
-		"Row":         {"type": true},
-		"Col":         {"id": true},
-	}
-	valid := map[string]bool{
-		"Root": true, "Parameters": true, "Parameter": true,
-		"Dataset": true, "ColumnInfo": true, "Column": true, "ConstColumn": true,
-		"Rows": true, "Row": true, "OrgRow": true, "Org_Row": true, "Col": true,
-	}
 	decoder := xmltext.NewDecoderBytes(b, xmlDecodeOptions...)
 	stack := []string{}
-	skipDepth := 0
 	rootSeen := false
+	currentDataset := -1
 	syntax := xmlSyntax{}
-	columnInfoSawColumn := false
 	for {
 		before := decoder.InputOffset()
 		token, err := readXMLToken(decoder)
@@ -694,79 +653,90 @@ func validateXMLStructure(b []byte, strict bool, profile string) (xmlSyntax, err
 		}
 		switch element := token.(type) {
 		case xmlStartToken:
-			if skipDepth > 0 {
-				skipDepth++
-				continue
-			}
 			if !rootSeen {
 				if element.Name.Local != "Root" {
 					return syntax, fmt.Errorf("root element must be Root")
 				}
 				rootSeen = true
 			}
-			if element.Name.Local == "Datasets" {
-				if !rootSeen {
-					return syntax, fmt.Errorf("Datasets wrapper must be inside Root")
-				}
+			if element.Name.Local == "OrgRow" && len(stack) > 0 && stack[len(stack)-1] == "Rows" {
+				return syntax, fmt.Errorf("OrgRow must be inside Row")
 			}
-			if !valid[element.Name.Local] {
-				skipDepth = 1
-				continue
-			}
-			if strict {
-				attributes := allowedAttributes[element.Name.Local]
+			switch element.Name.Local {
+			case "Dataset":
+				currentDataset = len(syntax.DatasetColumnIndexes)
+				syntax.DatasetColumnIndexes = append(syntax.DatasetColumnIndexes, map[string]int{})
+				id := ""
 				for _, attribute := range element.Attr {
-					if attribute.Name.Space == "xmlns" {
-						continue
-					}
-					if !attributes[attribute.Name.Local] {
-						return syntax, fmt.Errorf("unexpected attribute %s on %s", attribute.Name.Local, element.Name.Local)
+					if attribute.Name.Local == "id" {
+						id = attribute.Value
+						break
 					}
 				}
-			}
-			if len(stack) > 0 {
-				parent := stack[len(stack)-1]
-				if children, ok := allowed[parent]; ok && !children[element.Name.Local] {
-					if element.Name.Local == "OrgRow" && parent == "Rows" {
-						return syntax, fmt.Errorf("%s is not allowed inside %s", element.Name.Local, parent)
+				syntax.DatasetIDs = append(syntax.DatasetIDs, id)
+			case "Column", "ConstColumn":
+				if currentDataset >= 0 {
+					id := ""
+					for _, attribute := range element.Attr {
+						if attribute.Name.Local == "id" {
+							id = attribute.Value
+							break
+						}
 					}
-					skipDepth = 1
-					continue
+					indexes := syntax.DatasetColumnIndexes[currentDataset]
+					indexes[element.Name.Local+"\x00"+id] = len(indexes)
 				}
-			}
-			if element.Name.Local == "ColumnInfo" {
-				columnInfoSawColumn = false
-			}
-			if element.Name.Local == "Column" {
-				columnInfoSawColumn = true
-			}
-			if element.Name.Local == "ConstColumn" && columnInfoSawColumn {
-				syntax.ConstAfterColumn = true
-			}
-			if element.Name.Local == "Parameter" {
+			case "Parameter":
 				segment := bytes.TrimSpace(b[before:decoder.InputOffset()])
 				syntax.ParameterSelfClosing = append(syntax.ParameterSelfClosing, bytes.HasSuffix(segment, []byte("/>")))
 			}
 			stack = append(stack, element.Name.Local)
 		case xmlEndToken:
-			if skipDepth > 0 {
-				skipDepth--
-				continue
-			}
 			if len(stack) == 0 || stack[len(stack)-1] != element.Name.Local {
 				return syntax, fmt.Errorf("unexpected closing element %s", element.Name.Local)
 			}
 			stack = stack[:len(stack)-1]
+			if element.Name.Local == "Dataset" {
+				currentDataset = -1
+			}
 		}
 	}
 }
 
+func xmlColumnIndex(syntax xmlSyntax, datasetIndex int, kind, id string, fallback int) int {
+	if datasetIndex < len(syntax.DatasetColumnIndexes) {
+		if index, ok := syntax.DatasetColumnIndexes[datasetIndex][kind+"\x00"+id]; ok {
+			return index
+		}
+	}
+	return fallback
+}
+
+func orderXMLDatasets(datasets []xdataset, ids []string) []xdataset {
+	if len(ids) != len(datasets) {
+		return datasets
+	}
+	ordered := make([]xdataset, 0, len(datasets))
+	used := make([]bool, len(datasets))
+	for _, id := range ids {
+		for i, dataset := range datasets {
+			if !used[i] && dataset.ID == id {
+				ordered = append(ordered, dataset)
+				used[i] = true
+				break
+			}
+		}
+	}
+	if len(ordered) != len(datasets) {
+		return datasets
+	}
+	return ordered
+}
+
 func xmlNamespace(profile string) string {
 	switch profile {
-	case "xplatform-xml-4000":
-		return "http://www.tobesoft.com/platform/dataset"
 	case "xplatform-xml-5000":
-		return "http://www.tobesoft.com/platform/dataset"
+		return "http://www.tobesoft.com/platform/Dataset"
 	case "nexacro-xml-4000":
 		return "http://www.nexacroplatform.com/platform/dataset"
 	default:
@@ -774,18 +744,27 @@ func xmlNamespace(profile string) string {
 	}
 }
 
+// xmlAcceptedNamespace reports whether a decoded root namespace is acceptable
+// for the profile. Decode is intentionally permissive: it accepts both the
+// canonical namespace emitted by Encode and the variant forms the commercial
+// jars emit (tobesoft lowercase "dataset"; nexacro "nexacro.com"). Encode
+// still emits only the canonical form returned by xmlNamespace.
 func xmlAcceptedNamespace(profile, namespace string) bool {
-	for _, accepted := range xmlAcceptedNamespaces(profile) {
-		if namespace == accepted {
+	accepted := xmlAcceptedNamespaces(profile)
+	if len(accepted) == 0 {
+		return true
+	}
+	for _, value := range accepted {
+		if namespace == value {
 			return true
 		}
 	}
-	return len(xmlAcceptedNamespaces(profile)) == 0
+	return false
 }
 
 func xmlAcceptedNamespaces(profile string) []string {
 	switch profile {
-	case "xplatform-xml-4000", "xplatform-xml-5000":
+	case "xplatform-xml-5000":
 		return []string{"http://www.tobesoft.com/platform/Dataset", "http://www.tobesoft.com/platform/dataset"}
 	case "nexacro-xml-4000":
 		return []string{"http://www.nexacroplatform.com/platform/dataset", "http://www.nexacro.com/platform/dataset"}
@@ -817,105 +796,136 @@ func rejectDuplicateXMLAttrs(b []byte) error {
 	}
 }
 
-func xmlRow(r xrow, columns []protocol.Column, constants []protocol.ConstColumn) protocol.Row {
-	typ := map[string]string{"insert": "I", "update": "U", "delete": "D", "normal": "N"}[r.Type]
+func xmlRow(r xrow, columns []protocol.Column, constValues map[string]protocol.Cell, wireTypes map[string]string) protocol.Row {
+	typ := map[string]string{"insert": "I", "update": "U", "delete": "D", "normal": "N"}[strings.ToLower(r.Type)]
 	if typ == "" {
 		typ = "N"
 	}
 	row := protocol.Row{Type: typ, Values: map[string]protocol.Cell{}}
-	for _, c := range columns {
-		row.Values[c.ID] = protocol.Cell{State: "null"}
+	for _, column := range columns {
+		row.Values[column.ID] = protocol.Cell{State: "null"}
 	}
-	for _, c := range constants {
-		row.Values[c.ID] = c.Value
+	for id, value := range constValues {
+		row.Values[id] = value
 	}
-	for _, c := range r.Cols {
+	for _, cell := range r.Cols {
+		row.Values[cell.ID] = normalizeXMLCell(xmlCell(cell.Text), wireTypes[cell.ID])
+	}
+	if r.Org == nil && r.OrgUnderscore != nil {
+		for _, cell := range r.OrgUnderscore.Cols {
+			row.Values[cell.ID] = normalizeXMLCell(xmlCell(cell.Text), wireTypes[cell.ID])
+		}
+		return row
+	}
+	original := r.Org
+	if typ == "U" && original != nil {
+		saved := protocol.Row{Type: "O", Values: map[string]protocol.Cell{}}
 		for _, column := range columns {
-			if column.ID == c.ID {
-				row.Values[c.ID] = xmlTypedCell(column.Type, normalizeXMLLexical(column.Type, c.Text))
-				break
+			saved.Values[column.ID] = protocol.Cell{State: "null"}
+		}
+		for id, value := range constValues {
+			saved.Values[id] = value
+		}
+		meaningful := false
+		for _, cell := range original.Cols {
+			value := normalizeXMLCell(xmlCell(cell.Text), wireTypes[cell.ID])
+			saved.Values[cell.ID] = value
+			if value.State != "null" {
+				meaningful = true
 			}
 		}
-	}
-	if typ == "U" && r.Org != nil && len(r.Org.Cols) > 0 {
-		original := xmlRow(xrow{Type: "original", Cols: r.Org.Cols}, columns, constants)
-		original.Type = "O"
-		row.OrgRow = &original
+		if meaningful {
+			saved.MarkOrgRowPresent()
+			row.OrgRow = &saved
+		}
 	}
 	return row
 }
-func xmlTypedCell(dataType, lexical string) protocol.Cell {
-	if lexical != "" {
-		switch strings.ToUpper(dataType) {
-		case "BIGDECIMAL":
-			if strings.EqualFold(lexical, "nan") {
-				return protocol.Cell{State: "null"}
-			}
-		case "SHORT", "USHORT", "INT", "UINT", "LONG", "ULONG":
-			lexical = normalizeSourceInteger(lexical, true)
-		case "FLOAT", "DOUBLE":
-			lexical = normalizeSourceFloat(lexical, 64)
-		case "DATE":
-			if len(lexical) != 8 || !allDigits(lexical) {
-				return protocol.Cell{State: "null"}
-			}
-		case "TIME":
-			if len(lexical) != 9 || !allDigits(lexical) {
-				return protocol.Cell{State: "null"}
-			}
-		case "DATETIME":
-			if lexical == "690190220012803000" {
-				return protocol.Cell{State: "value", Lexical: lexical}
-			}
-			if len(lexical) != 17 || !allDigits(lexical) {
-				return protocol.Cell{State: "null"}
-			}
-		case "BLOB", "FILE":
-			if _, err := base64.StdEncoding.DecodeString(lexical); err != nil {
-				return protocol.Cell{State: "null"}
-			}
-		}
-		return protocol.Cell{State: "value", Lexical: lexical}
-	}
-	switch strings.ToUpper(dataType) {
-	case "SHORT", "USHORT", "INT", "UINT", "LONG", "ULONG", "BOOLEAN", "DECIMAL", "BIGDECIMAL":
-		return protocol.Cell{State: "value", Lexical: "0"}
-	case "FLOAT", "DOUBLE":
-		return protocol.Cell{State: "value", Lexical: "0.0"}
-	case "DATE", "TIME", "DATETIME", "BLOB", "FILE":
-		return protocol.Cell{State: "null"}
+
+func normalizeDecodedParameterType(dataType string) string {
+	dataType = strings.ToUpper(dataType)
+	switch dataType {
+	case "":
+		return "STRING"
+	case "FLOAT":
+		return "DOUBLE"
+	case "DECIMAL":
+		return "STRING"
 	default:
-		return protocol.Cell{State: "empty"}
-	}
-}
-func allDigits(value string) bool {
-	for _, r := range value {
-		if r < '0' || r > '9' {
-			return false
+		if !isKnownType(dataType) {
+			return "STRING"
 		}
+		return dataType
 	}
-	return true
 }
 
-func normalizeXMLLexical(dataType, lexical string) string {
-	if lexical == "" {
-		return lexical
+func normalizeXMLCell(cell protocol.Cell, dataType string) protocol.Cell {
+	if cell.State == "null" {
+		return cell
 	}
+	value := cell.Lexical
 	switch strings.ToUpper(dataType) {
-	case "FLOAT":
-		return normalizeSourceFloat(lexical, 32)
-	case "DOUBLE":
-		return normalizeSourceFloat(lexical, 64)
-	case "TIME":
-		return lexical + strings.Repeat("0", max(0, 9-len(lexical)))
-	case "DATETIME":
-		if lexical == "not-a-datetime" {
-			return "690190220012803000"
+	case "CHAR", "SHORT", "USHORT", "INT", "UINT":
+		value = javaInteger(value, 32)
+	case "LONG", "ULONG":
+		value = javaInteger(value, 64)
+	case "FLOAT", "DOUBLE":
+		// The drivers read a float column as a Java double.
+		value = javaFloating(value, 64)
+	case "BIGDECIMAL":
+		decimal, ok := javaBigDecimal(value)
+		if !ok {
+			return protocol.Cell{State: "null"}
 		}
-		return lexical + strings.Repeat("0", max(0, 17-len(lexical)))
-	default:
-		return lexical
+		value = decimal
+	case "DATE", "TIME", "DATETIME":
+		date, ok := javaDateLexical(value, dataType)
+		if !ok {
+			return protocol.Cell{State: "null"}
+		}
+		value = date
+	case "BOOLEAN":
+		if sourceBoolean(value) {
+			value = "true"
+		} else {
+			value = "false"
+		}
+	case "BLOB", "FILE":
+		if value == "" {
+			return protocol.Cell{State: "empty"}
+		}
+		if _, err := base64.StdEncoding.DecodeString(value); err != nil {
+			return protocol.Cell{State: "null"}
+		}
 	}
+	if cell.State == "empty" && value == "" {
+		return cell
+	}
+	cell.State = "value"
+	cell.Lexical = value
+	return cell
+}
+
+// textBlobCell is how the drivers read a BLOB parameter in the text formats:
+// Variable.set(String) converts the text to its bytes without decoding base64,
+// so the parameter holds the bytes of the wire text itself.
+func textBlobCell(cell protocol.Cell) protocol.Cell {
+	if cell.State != "value" && cell.State != "empty" {
+		return cell
+	}
+	if cell.Lexical == "" {
+		return protocol.Cell{State: "empty"}
+	}
+	return protocol.Cell{State: "value", Lexical: base64.StdEncoding.EncodeToString([]byte(cell.Lexical))}
+}
+
+func xmlCell(s string) protocol.Cell {
+	cell := protocol.Cell{State: "value", Lexical: s}
+	if s == "" {
+		cell.State = "empty"
+		cell.MarkLexicalPresent()
+	}
+	return cell
 }
 
 // xmlDecodeOptions selects the decoder profile for wire documents.
@@ -1035,7 +1045,7 @@ func parseXRoot(b []byte) (xroot, error) {
 		case "Datasets":
 			for _, d := range c.children {
 				if d.name.Local == "Dataset" {
-					root.WrappedDatasets = append(root.WrappedDatasets, d.dataset())
+					root.Datasets.Items = append(root.Datasets.Items, d.dataset())
 				}
 			}
 		}

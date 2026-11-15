@@ -37,27 +37,16 @@ func decodeSSVText(b []byte) (string, error) {
 }
 
 func ssvValue(b []byte, profile string, strict bool, unitSeparator, recordSeparator string) (protocol.Value, error) {
-	if unitSeparator != "" || recordSeparator != "" {
-		if _, err := decodeSSVText(b); err != nil {
-			return protocol.Value{}, err
-		}
-		return protocol.Value{Parameters: []protocol.Parameter{}, Datasets: []protocol.Dataset{}}, nil
-	}
 	text, err := decodeSSVText(b)
 	if err != nil {
 		return protocol.Value{}, err
 	}
+	// Vendor setProperty ignores custom separators; always parse its defaults.
 	unitSeparator = defaultSSVUnitSeparator
 	recordSeparator = defaultSSVRecordSeparator
-	if unitSeparator == recordSeparator {
-		return protocol.Value{}, fmt.Errorf("SSV separators must differ")
-	}
 
 	records, tail := splitSSVRecords(text, recordSeparator)
 	if tail != "" {
-		if strict {
-			return protocol.Value{}, fmt.Errorf("SSV record is not terminated")
-		}
 		records = append(records, tail)
 	}
 	if len(records) == 0 {
@@ -65,39 +54,13 @@ func ssvValue(b []byte, profile string, strict bool, unitSeparator, recordSepara
 	}
 
 	header := records[0]
-	recordStart := 1
-	codePage := ""
-	if header == "SSV" || strings.HasPrefix(header, "SSV:") {
-		if header == "SSV" {
-			codePage = ""
-		} else {
-			codePage = strings.TrimPrefix(header, "SSV:")
-		}
-		if strict && strings.HasPrefix(header, "SSV:") && codePage == "" {
-			return protocol.Value{}, fmt.Errorf("empty SSV code page")
-		}
-		if strings.EqualFold(codePage, "utf-8") {
-			codePage = ""
-		}
-	} else {
-		recordStart = 0
+	if strings.HasPrefix(header, "SSV:") && strings.TrimPrefix(header, "SSV:") == "" {
+		return protocol.Value{}, fmt.Errorf("empty SSV code page")
 	}
 
 	out := protocol.Value{Parameters: []protocol.Parameter{}, Datasets: []protocol.Dataset{}}
-	ssvWire := map[string]any{}
-	if codePage != "" {
-		ssvWire["codePage"] = codePage
-	}
-	if unitSeparator != defaultSSVUnitSeparator {
-		ssvWire["unitSeparator"] = unitSeparator
-	}
-	if recordSeparator != defaultSSVRecordSeparator {
-		ssvWire["recordSeparator"] = recordSeparator
-	}
-	if len(ssvWire) > 0 {
-		out.Wire = map[string]any{"ssv": ssvWire}
-	}
-	for i := recordStart; i < len(records); {
+
+	for i := 1; i < len(records); {
 		record := records[i]
 		if record == "" {
 			i++
@@ -120,14 +83,13 @@ func ssvValue(b []byte, profile string, strict bool, unitSeparator, recordSepara
 			if variableRecord == "" {
 				continue
 			}
-			parameter, err := parseSSVParameter(variableRecord, profile)
+			parameter, valid, err := parseSSVParameter(variableRecord, profile)
 			if err != nil {
 				return protocol.Value{}, err
 			}
-			if parameter.State == "missing" {
-				continue
+			if valid {
+				out.Parameters = replaceSSVParameter(out.Parameters, parameter)
 			}
-			out.Parameters = replaceSSVParameter(out.Parameters, parameter)
 		}
 		i++
 	}
@@ -146,20 +108,29 @@ func splitSSVRecords(input, separator string) ([]string, string) {
 	}
 }
 
-func parseSSVParameter(record, profile string) (protocol.Parameter, error) {
+func parseSSVParameter(record, profile string) (protocol.Parameter, bool, error) {
 	header, value, hasValue := strings.Cut(record, "=")
-	name, dataType, size, err := parseSSVTypedName(header)
+	name, dataType, _, err := parseSSVTypedName(header)
 	if err != nil || name == "" {
-		return protocol.Parameter{}, fmt.Errorf("invalid SSV variable %q", record)
+		return protocol.Parameter{}, false, fmt.Errorf("invalid SSV variable %q", record)
 	}
-	parameter := protocol.Parameter{ID: name, Type: dataType, State: "missing"}
-	if size != "" {
-		parameter.Wire = map[string]any{"length": size}
+	if !hasValue {
+		return protocol.Parameter{}, false, nil
 	}
-	if hasValue {
-		parameter.State, parameter.Lexical = ssvCell(value, profile)
+	if dataType == "UNDEFINED" {
+		dataType = "STRING"
 	}
-	return parameter, nil
+	cell := parsedSSVCell(value, profile)
+	if cell.State == "null" && isSSVNumericParameter(dataType) {
+		// Variable.set converts the null marker like an empty number: 0.
+		cell = protocol.Cell{State: "empty"}
+	}
+	cell = ssvTypedCell(cell, dataType, profile, true)
+	parameter := protocol.Parameter{ID: name, Type: dataType, State: cell.State, Lexical: cell.Lexical}
+	if cell.State == "empty" {
+		parameter.MarkLexicalPresent()
+	}
+	return parameter, true, nil
 }
 
 func replaceSSVParameter(parameters []protocol.Parameter, parameter protocol.Parameter) []protocol.Parameter {
@@ -180,7 +151,7 @@ func parseSSVDataset(records []string, start int, profile string, strict bool, u
 		ConstColumns: []protocol.ConstColumn{},
 		Rows:         []protocol.Row{},
 	}
-	if strict && dataset.ID == "" {
+	if dataset.ID == "" {
 		return protocol.Dataset{}, start, fmt.Errorf("empty SSV dataset id")
 	}
 
@@ -195,9 +166,6 @@ func parseSSVDataset(records []string, start int, profile string, strict bool, u
 			constants, err := parseSSVConstants(record, profile, unitSeparator)
 			if err != nil {
 				return protocol.Dataset{}, i, err
-			}
-			for j := range constants {
-				constants[j].Index = len(dataset.Columns) + len(dataset.ConstColumns) + j
 			}
 			dataset.ConstColumns = append(dataset.ConstColumns, constants...)
 			continue
@@ -220,22 +188,29 @@ func parseSSVDataset(records []string, start int, profile string, strict bool, u
 		if !valid {
 			continue
 		}
-		for _, constant := range dataset.ConstColumns {
-			cell := constant.Value
-			if cell.State == "missing" {
-				cell.State = "null"
-			}
-			row.Values[constant.ID] = cell
-		}
 		if row.Type == "O" {
-			if len(dataset.Rows) == 0 || dataset.Rows[len(dataset.Rows)-1].Type != "U" {
-				return protocol.Dataset{}, i, fmt.Errorf("invalid original row placement")
+			if len(dataset.Rows) > 0 && dataset.Rows[len(dataset.Rows)-1].Type == "U" {
+				for _, constant := range dataset.ConstColumns {
+					row.Values[constant.ID] = constant.Value
+				}
+				original := row
+				original.OrgRow = nil
+				original.MarkOrgRowPresent()
+				dataset.Rows[len(dataset.Rows)-1].OrgRow = &original
+				dataset.Rows[len(dataset.Rows)-1].MarkOrgRowPresent()
 			}
-			original := row
-			dataset.Rows[len(dataset.Rows)-1].OrgRow = &original
 			continue
 		}
+		row.MarkOrgRowPresent()
 		dataset.Rows = append(dataset.Rows, row)
+	}
+	for j := range dataset.ConstColumns {
+		constant := &dataset.ConstColumns[j]
+		constant.Index = len(dataset.Columns) + j
+		for rowIndex := range dataset.Rows {
+			dataset.Rows[rowIndex].Values[constant.ID] = constant.Value
+		}
+		constant.Value = protocol.Cell{}
 	}
 	return dataset, i, nil
 }
@@ -246,71 +221,53 @@ func parseSSVConstants(record, profile, unitSeparator string) ([]protocol.ConstC
 		return nil, fmt.Errorf("invalid SSV constant header")
 	}
 	constants := make([]protocol.ConstColumn, 0, len(fields)-1)
-	for i, field := range fields[1:] {
+	for _, field := range fields[1:] {
 		header, value, hasValue := strings.Cut(field, "=")
-		name, dataType, size, err := parseSSVTypedName(header)
-		if err != nil || name == "" {
-			return nil, fmt.Errorf("invalid SSV constant column %q", field)
-		}
 		if !hasValue {
 			continue
 		}
-		if strings.HasSuffix(header, ":") {
-			dataType = "UNDEFINED"
+		name, dataType, _, err := parseSSVTypedName(header)
+		if err != nil || name == "" {
+			return nil, fmt.Errorf("invalid SSV constant column %q", field)
 		}
-		constant := protocol.ConstColumn{ID: name, Type: dataType, Index: i, Size: size, Value: protocol.Cell{State: "missing"}}
-		if hasValue {
-			constant.Value.State, constant.Value.Lexical = ssvCell(value, profile)
+		// A constant has no null marker: \x03 here is the character itself.
+		cell := protocol.Cell{State: "value", Lexical: value}
+		if value == "" {
+			cell = protocol.Cell{State: "empty"}
+			cell.MarkLexicalPresent()
 		}
-		constants = append(constants, constant)
+		constants = append(constants, protocol.ConstColumn{ID: name, Type: dataType, Value: cell})
 	}
 	return constants, nil
 }
 
 func parseSSVColumns(record, unitSeparator string) ([]protocol.Column, error) {
 	fields := strings.Split(record, unitSeparator)
-	if fields[0] != "_RowType_" || len(fields) < 2 {
+	if fields[0] != "_RowType_" {
 		return nil, fmt.Errorf("invalid SSV column header")
 	}
 	columns := make([]protocol.Column, 0, len(fields)-1)
 	for _, field := range fields[1:] {
 		parts := strings.SplitN(field, ":", 4)
-		name, dataType, size, err := parseSSVTypedName(strings.Join(parts[:min(2, len(parts))], ":"))
-		if err != nil {
+		typedName := strings.Join(parts[:min(2, len(parts))], ":")
+		name, dataType, size, err := parseSSVTypedName(typedName)
+		if err != nil || name == "" {
 			return nil, fmt.Errorf("invalid SSV column %q", field)
 		}
-		if len(parts) > 1 && parts[1] == "" {
+		if len(parts) > 2 && size == "" {
 			dataType = "UNDEFINED"
 		}
-		if name == "" {
-			name = field
-		}
-		if strings.EqualFold(dataType, "FLOAT") {
-			dataType = "DOUBLE"
-		}
-		if strings.EqualFold(dataType, "DECIMAL") {
-			dataType = "UNDEFINED"
-		}
-		column := protocol.Column{ID: name, Type: dataType, Size: size}
-		if len(parts) > 2 {
-			column.Prop = parts[2]
-		}
-		if size == "" && dataType == "STRING" && column.Prop != "" {
-			column.Type = "UNDEFINED"
-		}
-		if len(parts) > 3 {
-			column.SumText = parts[3]
-		}
-		columns = append(columns, column)
+		columns = append(columns, protocol.Column{ID: name, Type: dataType})
 	}
 	return columns, nil
 }
 
 func parseSSVTypedName(header string) (string, string, string, error) {
-	name, typeAndSize, hasType := strings.Cut(header, ":")
-	if !hasType {
-		return name, "STRING", "", nil
+	colon := strings.IndexByte(header, ':')
+	if colon <= 0 {
+		return header, "STRING", "", nil
 	}
+	name, typeAndSize := header[:colon], header[colon+1:]
 	dataType := typeAndSize
 	size := ""
 	if open := strings.IndexByte(typeAndSize, '('); open >= 0 {
@@ -323,23 +280,26 @@ func parseSSVTypedName(header string) (string, string, string, error) {
 			return "", "", "", fmt.Errorf("empty SSV length")
 		}
 	}
-	if dataType == "" {
+	switch strings.ToUpper(dataType) {
+	case "":
 		dataType = "STRING"
-	}
-	dataType = strings.ToUpper(dataType)
-	if !isKnownType(dataType) {
+	case "FLOAT":
+		dataType = "DOUBLE"
+	case "DECIMAL":
 		dataType = "UNDEFINED"
+	default:
+		dataType = strings.ToUpper(dataType)
+		if !isKnownType(dataType) {
+			dataType = "UNDEFINED"
+		}
 	}
 	return name, dataType, size, nil
 }
 
 func parseSSVRow(record string, columns []protocol.Column, profile string, strict bool, unitSeparator string) (protocol.Row, bool, error) {
 	fields := strings.Split(record, unitSeparator)
-	if len(fields[0]) != 1 || !strings.Contains("NIUDO", fields[0]) {
+	if len(fields[0]) != 1 || !strings.Contains("NIUDO", fields[0]) || len(columns) == 0 {
 		return protocol.Row{}, false, nil
-	}
-	if strict && len(fields)-1 > len(columns) {
-		return protocol.Row{}, false, fmt.Errorf("SSV row has too many values")
 	}
 	row := protocol.Row{Type: fields[0], Values: map[string]protocol.Cell{}}
 	for i, column := range columns {
@@ -347,10 +307,29 @@ func parseSSVRow(record string, columns []protocol.Column, profile string, stric
 			row.Values[column.ID] = protocol.Cell{State: "missing"}
 			continue
 		}
-		state, lexical := ssvCell(fields[i+1], profile)
-		row.Values[column.ID] = protocol.Cell{State: state, Lexical: lexical}
+		row.Values[column.ID] = ssvTypedCell(parsedSSVCell(fields[i+1], profile), column.Type, profile, false)
 	}
 	return row, true, nil
+}
+
+func isSSVNumericParameter(dataType string) bool {
+	switch strings.ToUpper(dataType) {
+	case "SHORT", "USHORT", "INT", "UINT", "LONG", "ULONG", "FLOAT", "DOUBLE":
+		return true
+	}
+	return false
+}
+
+// ssvTypedCell converts a cell the way the drivers' typed setters do: an
+// empty number reads as 0, an empty date or bigdecimal as null (see
+// normalizeXMLCell). BLOB text is base64-decoded only for Nexacro SSV
+// columns; parameters, and every XPLATFORM SSV BLOB, keep the bytes of the
+// text itself.
+func ssvTypedCell(cell protocol.Cell, dataType, profile string, parameter bool) protocol.Cell {
+	if isBlobType(dataType) && (parameter || profile == xplatformSSVProfile) {
+		return textBlobCell(cell)
+	}
+	return normalizeXMLCell(cell, strings.ToUpper(dataType))
 }
 
 func ssvCell(value, profile string) (string, string) {
@@ -372,31 +351,21 @@ func ssvCell(value, profile string) (string, string) {
 	return "value", value
 }
 
+func parsedSSVCell(value, profile string) protocol.Cell {
+	state, lexical := ssvCell(value, profile)
+	cell := protocol.Cell{State: state, Lexical: lexical}
+	if state == "empty" {
+		cell.MarkLexicalPresent()
+	}
+	return cell
+}
+
 func encodeSSV(value protocol.Value, profile string) ([]byte, error) {
 	unitSeparator, recordSeparator := defaultSSVUnitSeparator, defaultSSVRecordSeparator
-	codePage := "UTF-8"
-	if wire, ok := value.Wire["ssv"].(map[string]any); ok {
-		if configured, ok := wire["unitSeparator"].(string); ok && configured != "" {
-			unitSeparator = configured
-		}
-		if configured, ok := wire["recordSeparator"].(string); ok && configured != "" {
-			recordSeparator = configured
-		}
-		if configured, ok := wire["codePage"].(string); ok {
-			codePage = configured
-		}
-	}
-	if unitSeparator == recordSeparator {
-		return nil, fmt.Errorf("SSV separators must differ")
-	}
 
 	var out strings.Builder
 	writeRecord := func(record string) { out.WriteString(record); out.WriteString(recordSeparator) }
-	header := "SSV"
-	if codePage != "" {
-		header += ":" + codePage
-	}
-	writeRecord(header)
+	writeRecord("SSV:UTF-8")
 
 	for _, parameter := range value.Parameters {
 		record, err := encodeSSVParameter(parameter, profile, unitSeparator, recordSeparator)
@@ -426,26 +395,23 @@ func encodeSSV(value protocol.Value, profile string) ([]byte, error) {
 		}
 		columnFields := []string{"_RowType_"}
 		for _, column := range dataset.Columns {
-			field, err := encodeSSVColumn(column, profile, unitSeparator, recordSeparator)
+			field, err := encodeSSVColumn(column, unitSeparator, recordSeparator)
 			if err != nil {
 				return nil, err
 			}
 			columnFields = append(columnFields, field)
 		}
 		writeRecord(strings.Join(columnFields, unitSeparator))
-		for rowIndex, row := range dataset.Rows {
-			if row.Type == "O" && rowIndex > 0 && dataset.Rows[rowIndex-1].OrgRow != nil && sameRow(*dataset.Rows[rowIndex-1].OrgRow, row) {
-				continue
-			}
+		for _, row := range dataset.Rows {
 			record, err := encodeSSVRow(row, dataset.Columns, profile, unitSeparator, recordSeparator)
 			if err != nil {
 				return nil, err
 			}
 			writeRecord(record)
 			if row.OrgRow != nil {
-				original := *row.OrgRow
-				original.Type = "O"
-				record, err = encodeSSVRow(original, dataset.Columns, profile, unitSeparator, recordSeparator)
+				org := *row.OrgRow
+				org.Type = "O"
+				record, err := encodeSSVRow(org, dataset.Columns, profile, unitSeparator, recordSeparator)
 				if err != nil {
 					return nil, err
 				}
@@ -466,48 +432,37 @@ func encodeSSVParameter(parameter protocol.Parameter, profile, unitSeparator, re
 	if err := validateSSVToken(parameter.ID, unitSeparator, recordSeparator); err != nil {
 		return "", fmt.Errorf("parameter id: %w", err)
 	}
-	typeName := defaultType(parameter.Type)
-	if profile == nexacroSSVProfile || profile == xplatformSSVProfile {
-		typeName = strings.ToLower(typeName)
-	}
-	header := parameter.ID + ":" + typeName
-	if parameter.Wire != nil {
-		if length, ok := parameter.Wire["length"].(string); ok && length != "" {
-			header += "(" + length + ")"
-		}
-	}
+	header := parameter.ID + ":" + ssvWireType(parameter.Type)
 	if parameter.State == "missing" {
 		return header, nil
 	}
-	encoded, err := encodeSSVCell(protocol.Cell{State: parameter.State, Lexical: parameter.Lexical}, profile, unitSeparator, recordSeparator)
+	cell := protocol.Cell{State: parameter.State, Lexical: parameter.Lexical}
+	if cell.State == "null" && strings.EqualFold(defaultType(parameter.Type), "BLOB") {
+		// The drivers write a null BLOB variable as an empty value.
+		cell = protocol.Cell{State: "empty"}
+	}
+	encoded, err := encodeSSVTypedCell(parameter.Type, cell, profile, unitSeparator, recordSeparator)
 	if err != nil {
 		return "", err
 	}
 	return header + "=" + encoded, nil
 }
 
-func ssvColumnType(dataType, size, profile string) (string, string) {
-	typeName := defaultType(dataType)
-	if profile == nexacroSSVProfile || profile == xplatformSSVProfile {
-		typeName = strings.ToLower(typeName)
-		if size == "" && typeName == "string" {
-			size = "32"
-		}
-	}
-	return typeName, size
-}
-
 func encodeSSVConstant(column protocol.ConstColumn, profile, unitSeparator, recordSeparator string) (string, error) {
 	if err := validateSSVToken(column.ID, unitSeparator, recordSeparator); err != nil {
 		return "", fmt.Errorf("constant column id: %w", err)
 	}
-	typeName, size := ssvColumnType(column.Type, column.Size, profile)
-	field := column.ID + ":" + typeName
-	if size != "" {
-		field += "(" + size + ")"
+	size := column.Size
+	if size == "" {
+		size = ssvDefaultSize(column.Type)
 	}
+	field := column.ID + ":" + ssvWireType(column.Type) + "(" + size + ")"
 	if column.Value.State == "missing" {
 		return field, nil
+	}
+	// A constant has no null marker: null is written as an empty value.
+	if column.Value.State == "null" {
+		return field + "=", nil
 	}
 	encoded, err := encodeSSVCell(column.Value, profile, unitSeparator, recordSeparator)
 	if err != nil {
@@ -516,21 +471,15 @@ func encodeSSVConstant(column protocol.ConstColumn, profile, unitSeparator, reco
 	return field + "=" + encoded, nil
 }
 
-func encodeSSVColumn(column protocol.Column, profile, unitSeparator, recordSeparator string) (string, error) {
+func encodeSSVColumn(column protocol.Column, unitSeparator, recordSeparator string) (string, error) {
 	if err := validateSSVToken(column.ID, unitSeparator, recordSeparator); err != nil {
 		return "", fmt.Errorf("column id: %w", err)
 	}
-	typeName, size := ssvColumnType(column.Type, column.Size, profile)
-	field := column.ID + ":" + typeName
-	if size != "" {
-		field += "(" + size + ")"
+	size := column.Size
+	if size == "" {
+		size = ssvDefaultSize(column.Type)
 	}
-	if column.Prop != "" || column.SumText != "" {
-		field += ":" + column.Prop
-		if column.SumText != "" {
-			field += ":" + column.SumText
-		}
-	}
+	field := column.ID + ":" + ssvWireType(column.Type) + "(" + size + ")"
 	if err := validateSSVToken(field, unitSeparator, recordSeparator); err != nil {
 		return "", err
 	}
@@ -548,13 +497,27 @@ func encodeSSVRow(row protocol.Row, columns []protocol.Column, profile, unitSepa
 		if !ok {
 			cell = protocol.Cell{State: "missing"}
 		}
-		encoded, err := encodeSSVCell(cell, profile, unitSeparator, recordSeparator)
+		dataType := column.Type
+		if row.Type == "O" {
+			// A saved row keeps no BOOLEAN default.
+			dataType = "STRING"
+		}
+		encoded, err := encodeSSVTypedCell(dataType, cell, profile, unitSeparator, recordSeparator)
 		if err != nil {
 			return "", fmt.Errorf("column %q: %w", column.ID, err)
 		}
 		fields = append(fields, encoded)
 	}
 	return strings.Join(fields, unitSeparator), nil
+}
+
+// encodeSSVTypedCell writes an unset BOOLEAN as 0, as the drivers hold it as
+// false.
+func encodeSSVTypedCell(dataType string, cell protocol.Cell, profile, unitSeparator, recordSeparator string) (string, error) {
+	if (cell.State == "null" || cell.State == "missing") && strings.EqualFold(defaultType(dataType), "BOOLEAN") {
+		return "0", nil
+	}
+	return encodeSSVCell(cell, profile, unitSeparator, recordSeparator)
 }
 
 func encodeSSVCell(cell protocol.Cell, profile, unitSeparator, recordSeparator string) (string, error) {
@@ -566,14 +529,68 @@ func encodeSSVCell(cell protocol.Cell, profile, unitSeparator, recordSeparator s
 		return cell.Lexical, nil
 	case "empty":
 		return "", nil
-	case "missing", "null":
-		if profile == "xplatform-ssv" {
+	case "null":
+		if profile == xplatformSSVProfile {
 			return "", nil
 		}
 		return "\x03", nil
-
+	case "missing":
+		if profile == xplatformSSVProfile {
+			return "", nil
+		}
+		return "\x03", nil
 	default:
 		return "", fmt.Errorf("invalid cell state %q", cell.State)
+	}
+}
+
+func ssvWireType(dataType string) string {
+	switch strings.ToUpper(defaultType(dataType)) {
+	case "CHAR", "STRING":
+		return "string"
+	case "SHORT", "USHORT", "INT", "UINT", "BOOLEAN":
+		return "int"
+	case "FLOAT", "DOUBLE":
+		return "float"
+	case "LONG", "ULONG", "DECIMAL", "BIGDECIMAL":
+		return "bigdecimal"
+	case "DATE":
+		return "date"
+	case "TIME":
+		return "time"
+	case "DATETIME":
+		return "datetime"
+	case "BLOB", "FILE":
+		return "blob"
+	default:
+		return strings.ToLower(defaultType(dataType))
+	}
+}
+
+func ssvDefaultSize(dataType string) string {
+	switch strings.ToUpper(defaultType(dataType)) {
+	case "CHAR":
+		return "1"
+	case "STRING":
+		return "32"
+	case "SHORT", "USHORT", "BOOLEAN":
+		return "2"
+	case "INT", "UINT", "FLOAT":
+		return "4"
+	case "LONG", "ULONG", "DOUBLE":
+		return "8"
+	case "DECIMAL", "BIGDECIMAL":
+		return "16"
+	case "DATE":
+		return "6"
+	case "TIME":
+		return "9"
+	case "DATETIME":
+		return "17"
+	case "BLOB", "FILE":
+		return "256"
+	default:
+		return "0"
 	}
 }
 

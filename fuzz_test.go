@@ -1,12 +1,13 @@
 package xapi
 
 import (
-	"bytes"
 	"encoding/json"
-	"encoding/xml"
 	"io"
 	"reflect"
 	"testing"
+
+	"github.com/go-xml-experiment/xml"
+	"github.com/go-xml-experiment/xml/xmltext"
 )
 
 func FuzzXMLDecodeDoesNotPanic(f *testing.F) {
@@ -160,9 +161,9 @@ func BenchmarkXMLTokenize100kRows(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		dec := xml.NewDecoder(bytes.NewReader(data))
+		dec := xmltext.NewDecoderBytes(data)
 		for {
-			if _, err := dec.Token(); err == io.EOF {
+			if _, err := dec.ReadToken(); err == io.EOF {
 				break
 			} else if err != nil {
 				b.Fatal(err)
@@ -171,34 +172,42 @@ func BenchmarkXMLTokenize100kRows(b *testing.B) {
 	}
 }
 
-type stdXMLBenchmarkRoot struct {
-	Dataset stdXMLBenchmarkDataset `xml:"Dataset"`
+// The reflection baseline uses go-xml-experiment's struct mapping, which
+// matches names with their namespace: qualified puts the child elements in
+// the root's namespace.
+type reflectXMLBenchmarkRoot struct {
+	XMLName xmltext.Name           `xml:"http://www.nexacroplatform.com/platform/dataset Root,qualified"`
+	Dataset reflectXMLBenchmarkSet `xml:"Dataset"`
 }
-type stdXMLBenchmarkDataset struct {
-	Rows stdXMLBenchmarkRows `xml:"Rows"`
+type reflectXMLBenchmarkSet struct {
+	Rows reflectXMLBenchmarkRows `xml:"Rows"`
 }
-type stdXMLBenchmarkRows struct {
-	Rows []stdXMLBenchmarkRow `xml:"Row"`
+type reflectXMLBenchmarkRows struct {
+	Rows []reflectXMLBenchmarkRow `xml:"Row"`
 }
-type stdXMLBenchmarkRow struct {
-	Cols []stdXMLBenchmarkCol `xml:"Col"`
+type reflectXMLBenchmarkRow struct {
+	Cols []reflectXMLBenchmarkCol `xml:"Col"`
 }
-type stdXMLBenchmarkCol struct {
+type reflectXMLBenchmarkCol struct {
 	ID    string `xml:"id,attr"`
 	Value string `xml:",chardata"`
 }
 
-func BenchmarkXMLStdlibUnmarshal100kRows(b *testing.B) {
+func BenchmarkXMLReflectUnmarshal100kRows(b *testing.B) {
 	data, err := Marshal(benchmarkRows(100_000), NexacroXML4000)
 	if err != nil {
 		b.Fatal(err)
+	}
+	var probe reflectXMLBenchmarkRoot
+	if err := xml.Unmarshal(data, &probe); err != nil || len(probe.Dataset.Rows.Rows) != 100_000 {
+		b.Fatalf("baseline read %d rows: %v", len(probe.Dataset.Rows.Rows), err)
 	}
 	b.ReportMetric(float64(len(data)), "input-bytes")
 	b.SetBytes(int64(len(data)))
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		var out stdXMLBenchmarkRoot
+		var out reflectXMLBenchmarkRoot
 		if err := xml.Unmarshal(data, &out); err != nil {
 			b.Fatal(err)
 		}

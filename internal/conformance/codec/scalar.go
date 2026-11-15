@@ -1,10 +1,7 @@
 package codec
 
 import (
-	"math"
-	"math/big"
 	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/Clickin/xapi-go/internal/conformance/protocol"
@@ -28,7 +25,7 @@ func applyScalarCompatibility(value protocol.Value) protocol.Value {
 		dataset := &datasets[di]
 		constants := append([]protocol.ConstColumn(nil), dataset.ConstColumns...)
 		for i := range constants {
-			constants[i].Value = normalizeSourceCell(constants[i].Type, constants[i].Value)
+			constants[i].Value = normalizeSourceConstCell(constants[i].Type, constants[i].Value)
 		}
 		dataset.ConstColumns = constants
 
@@ -73,18 +70,45 @@ func normalizeSourceCell(dataType string, cell protocol.Cell) protocol.Cell {
 		} else {
 			cell.Lexical = "0"
 		}
-	case "SHORT", "USHORT", "INT":
-		cell.Lexical = normalizeSourceInteger(cell.Lexical, true)
-	case "UINT":
-		cell.Lexical = normalizeSourceUint(cell.Lexical)
+	case "SHORT", "USHORT", "INT", "UINT":
+		cell.Lexical = javaInteger(cell.Lexical, 32)
 	case "LONG", "ULONG":
-		cell.Lexical = normalizeSourceInteger(cell.Lexical, false)
+		cell.Lexical = javaInteger(cell.Lexical, 64)
 	case "FLOAT":
-		cell.Lexical = normalizeSourceFloat(cell.Lexical, 32)
+		cell.Lexical = javaFloating(cell.Lexical, 32)
 	case "DOUBLE":
-		cell.Lexical = normalizeSourceFloat(cell.Lexical, 64)
+		cell.Lexical = javaFloating(cell.Lexical, 64)
 	case "DECIMAL", "BIGDECIMAL":
-		cell.Lexical = normalizeSourceDecimal(cell.Lexical)
+		decimal, ok := javaBigDecimal(cell.Lexical)
+		if !ok {
+			return protocol.Cell{State: "null"}
+		}
+		cell.Lexical = decimal
+	case "DATE", "TIME", "DATETIME":
+		date, ok := javaDateLexical(cell.Lexical, strings.ToUpper(defaultType(dataType)))
+		if !ok {
+			return protocol.Cell{State: "null"}
+		}
+		cell.Lexical = date
+	}
+	return cell
+}
+
+// normalizeSourceConstCell converts only BOOLEAN constants, which the drivers
+// always write as 1 or 0 (empty and null as 0); other constant values are
+// written as given.
+func normalizeSourceConstCell(dataType string, cell protocol.Cell) protocol.Cell {
+	if cell.State == "missing" {
+		return cell
+	}
+	switch strings.ToUpper(defaultType(dataType)) {
+	case "BOOLEAN":
+		cell.State = "value"
+		if sourceBoolean(cell.Lexical) {
+			cell.Lexical = "1"
+		} else {
+			cell.Lexical = "0"
+		}
 	}
 	return cell
 }
@@ -98,93 +122,33 @@ func sourceBoolean(value string) bool {
 	}
 }
 
-func normalizeSourceInteger(value string, allowHex bool) string {
-	value = strings.ReplaceAll(strings.TrimSpace(value), ",", "")
-	if allowHex && (strings.HasPrefix(value, "0x") || strings.HasPrefix(value, "0X")) {
-		if parsed, err := strconv.ParseInt(value[2:], 16, 64); err == nil {
-			return strconv.FormatInt(parsed, 10)
-		}
-		return "0"
-	}
-	if parsed, ok := new(big.Rat).SetString(value); ok {
-		integer := new(big.Int).Quo(parsed.Num(), parsed.Denom())
-		if integer.IsInt64() {
-			return integer.String()
+func jsonScalar(dataType string, cell protocol.Cell) (string, bool) {
+	dataType = strings.ToUpper(defaultType(dataType))
+	if cell.State == "empty" {
+		switch dataType {
+		case "STRING", "CHAR", "FILE", "BLOB":
+			return "", true
 		}
 	}
-
-	return "0"
-}
-func normalizeSourceUint(value string) string {
-	value = strings.ReplaceAll(strings.TrimSpace(value), ",", "")
-	parsed, err := strconv.ParseUint(value, 10, 32)
-	if err != nil || parsed > uint64(math.MaxInt32) {
-		return "0"
+	if cell.State != "value" {
+		if dataType == "BOOLEAN" {
+			return "0", true
+		}
+		return "", false
 	}
-	return strconv.FormatUint(parsed, 10)
-}
-
-func normalizeSourceFloat(value string, bits int) string {
-	value = strings.ReplaceAll(strings.TrimSpace(value), ",", "")
-	var parsed float64
-	var err error
-	switch value {
-	case "Infinity", "+Infinity":
-		parsed = math.Inf(1)
-	case "-Infinity":
-		parsed = math.Inf(-1)
+	if cell.Lexical != "" {
+		return cell.Lexical, true
+	}
+	switch dataType {
+	case "STRING", "CHAR", "FILE", "BLOB":
+		return "", true
+	case "SHORT", "USHORT", "INT", "UINT", "LONG", "ULONG":
+		return "0", true
+	case "FLOAT", "DOUBLE":
+		return "0.0", true
+	case "BOOLEAN":
+		return "0", true
 	default:
-		parsed, err = strconv.ParseFloat(value, bits)
-		if err != nil {
-			return "0.0"
-		}
+		return "", false
 	}
-	if math.IsNaN(parsed) {
-		return "NaN"
-	}
-	if math.IsInf(parsed, 1) {
-		return "Infinity"
-	}
-	if math.IsInf(parsed, -1) {
-		return "-Infinity"
-	}
-	formatted := strconv.FormatFloat(parsed, 'g', -1, bits)
-	if !strings.ContainsAny(formatted, ".eE") {
-		formatted += ".0"
-	}
-	return formatted
-}
-
-func normalizeSourceDecimal(value string) string {
-	value = strings.ReplaceAll(strings.TrimSpace(value), ",", "")
-	if !sourceDecimalPattern.MatchString(value) {
-		return "0"
-	}
-	exponent := ""
-	if i := strings.IndexAny(value, "eE"); i >= 0 {
-		exponent, value = value[i:], value[:i]
-	}
-	sign := ""
-	if strings.HasPrefix(value, "+") || strings.HasPrefix(value, "-") {
-		sign, value = value[:1], value[1:]
-	}
-	integer, fraction, found := strings.Cut(value, ".")
-	integer = strings.TrimLeft(integer, "0")
-	if integer == "" {
-		integer = "0"
-	}
-	if sign == "+" {
-		sign = ""
-	}
-	if found {
-		return sign + integer + "." + fraction + exponent
-	}
-	return sign + integer + exponent
-}
-
-func jsonScalar(dataType string, cell protocol.Cell) any {
-	if cell.State == "null" {
-		return nil
-	}
-	return cell.Lexical
 }

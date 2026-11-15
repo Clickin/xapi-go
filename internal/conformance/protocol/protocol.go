@@ -11,18 +11,117 @@ import (
 
 const Version = "1.0"
 
+func decodeStrictJSONValue(data []byte, dst any) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dst); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return errors.New("multiple JSON values")
+		}
+		return err
+	}
+	return nil
+}
+
 type Cell struct {
-	State   string `json:"state"`
-	Lexical string `json:"lexical,omitempty"`
+	State          string `json:"state"`
+	Lexical        string `json:"lexical,omitempty"`
+	lexicalPresent bool
 }
+
+func (cell *Cell) MarkLexicalPresent() {
+	cell.lexicalPresent = true
+}
+
+func (cell *Cell) UnmarshalJSON(data []byte) error {
+	var in struct {
+		State   string  `json:"state"`
+		Lexical *string `json:"lexical"`
+	}
+	if err := decodeStrictJSONValue(data, &in); err != nil {
+		return err
+	}
+	cell.State = in.State
+	if in.Lexical != nil {
+		cell.Lexical = *in.Lexical
+		cell.lexicalPresent = true
+	}
+	return nil
+}
+
+func (cell Cell) MarshalJSON() ([]byte, error) {
+	type cellJSON struct {
+		State   string  `json:"state"`
+		Lexical *string `json:"lexical,omitempty"`
+	}
+	out := cellJSON{State: cell.State}
+	if cell.lexicalPresent || cell.Lexical != "" {
+		out.Lexical = &cell.Lexical
+	}
+	return json.Marshal(out)
+}
+
 type Parameter struct {
-	ID      string         `json:"id"`
-	Type    string         `json:"type"`
-	State   string         `json:"state"`
-	Lexical string         `json:"lexical,omitempty"`
-	Index   int            `json:"index,omitempty"`
-	Wire    map[string]any `json:"wire,omitempty"`
+	ID             string         `json:"id"`
+	Type           string         `json:"type"`
+	State          string         `json:"state"`
+	Lexical        string         `json:"lexical,omitempty"`
+	Index          int            `json:"index,omitempty"`
+	Wire           map[string]any `json:"wire,omitempty"`
+	lexicalPresent bool
 }
+
+func (parameter *Parameter) MarkLexicalPresent() {
+	parameter.lexicalPresent = true
+}
+
+func (parameter *Parameter) UnmarshalJSON(data []byte) error {
+	var in struct {
+		ID      string         `json:"id"`
+		Type    string         `json:"type"`
+		State   string         `json:"state"`
+		Lexical *string        `json:"lexical"`
+		Index   int            `json:"index"`
+		Wire    map[string]any `json:"wire"`
+	}
+	if err := decodeStrictJSONValue(data, &in); err != nil {
+		return err
+	}
+	parameter.ID = in.ID
+	parameter.Type = in.Type
+	parameter.State = in.State
+	parameter.Index = in.Index
+	parameter.Wire = in.Wire
+	if in.Lexical != nil {
+		parameter.Lexical = *in.Lexical
+		parameter.lexicalPresent = true
+	}
+	return nil
+}
+
+func (parameter Parameter) MarshalJSON() ([]byte, error) {
+	type parameterJSON struct {
+		ID      string         `json:"id"`
+		Type    string         `json:"type"`
+		State   string         `json:"state"`
+		Lexical *string        `json:"lexical,omitempty"`
+		Index   int            `json:"index,omitempty"`
+		Wire    map[string]any `json:"wire,omitempty"`
+	}
+	out := parameterJSON{
+		ID: parameter.ID, Type: parameter.Type, State: parameter.State,
+		Index: parameter.Index, Wire: parameter.Wire,
+	}
+	if parameter.lexicalPresent || parameter.Lexical != "" {
+		out.Lexical = &parameter.Lexical
+	}
+	return json.Marshal(out)
+}
+
 type Column struct {
 	ID       string `json:"id"`
 	Type     string `json:"type"`
@@ -35,16 +134,84 @@ type Column struct {
 type ConstColumn struct {
 	ID       string `json:"id"`
 	Type     string `json:"type"`
-	Index    int    `json:"index"`
-	Value    Cell   `json:"value"`
+	Index    int    `json:"index,omitempty"`
+	Value    Cell   `json:"value,omitempty"`
 	Size     string `json:"size,omitempty"`
 	Encoding string `json:"encoding,omitempty"`
 }
-type Row struct {
-	Type   string          `json:"type"`
-	OrgRow *Row            `json:"orgRow"`
-	Values map[string]Cell `json:"values"`
+
+func (column ConstColumn) MarshalJSON() ([]byte, error) {
+	type constColumnJSON struct {
+		ID       string `json:"id"`
+		Type     string `json:"type"`
+		Index    *int   `json:"index,omitempty"`
+		Value    *Cell  `json:"value,omitempty"`
+		Size     string `json:"size,omitempty"`
+		Encoding string `json:"encoding,omitempty"`
+	}
+	out := constColumnJSON{
+		ID:       column.ID,
+		Type:     column.Type,
+		Size:     column.Size,
+		Encoding: column.Encoding,
+	}
+	if column.Value.State != "" {
+		out.Value = &column.Value
+	} else {
+		out.Index = &column.Index
+	}
+	return json.Marshal(out)
 }
+
+type Row struct {
+	Type          string          `json:"type"`
+	OrgRow        *Row            `json:"orgRow"`
+	Values        map[string]Cell `json:"values"`
+	orgRowPresent bool
+}
+
+func (row *Row) MarkOrgRowPresent() {
+	row.orgRowPresent = true
+}
+
+func (row *Row) UnmarshalJSON(data []byte) error {
+	var in struct {
+		Type   string          `json:"type"`
+		OrgRow json.RawMessage `json:"orgRow"`
+		Values map[string]Cell `json:"values"`
+	}
+	if err := decodeStrictJSONValue(data, &in); err != nil {
+		return err
+	}
+	row.Type = in.Type
+	row.Values = in.Values
+	if len(in.OrgRow) > 0 {
+		row.orgRowPresent = true
+		if string(in.OrgRow) != "null" {
+			var org Row
+			if err := decodeStrictJSONValue(in.OrgRow, &org); err != nil {
+				return err
+			}
+			row.OrgRow = &org
+		}
+	}
+	return nil
+}
+
+func (row Row) MarshalJSON() ([]byte, error) {
+	if row.orgRowPresent || row.OrgRow != nil {
+		return json.Marshal(struct {
+			Type   string          `json:"type"`
+			OrgRow *Row            `json:"orgRow"`
+			Values map[string]Cell `json:"values"`
+		}{Type: row.Type, OrgRow: row.OrgRow, Values: row.Values})
+	}
+	return json.Marshal(struct {
+		Type   string          `json:"type"`
+		Values map[string]Cell `json:"values"`
+	}{Type: row.Type, Values: row.Values})
+}
+
 type Dataset struct {
 	ID           string         `json:"id"`
 	Columns      []Column       `json:"columns"`

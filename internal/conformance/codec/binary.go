@@ -100,7 +100,8 @@ func isBinaryProfile(profile string) bool {
 
 func binaryValue(b []byte, strict bool) (protocol.Value, error) {
 	if len(b) == 0 {
-		return protocol.Value{}, nil
+		// The drivers cannot read an empty PlatformBinary body.
+		return protocol.Value{}, fmt.Errorf("empty PlatformBinary payload")
 	}
 	if len(b) > binaryMaxPayload {
 		return protocol.Value{}, fmt.Errorf("binary payload exceeds limit")
@@ -179,7 +180,7 @@ func readBinaryVariables(r *binaryReader, value *protocol.Value) error {
 			return err
 		}
 		state, lexical := binaryCell(v)
-		value.Parameters = append(value.Parameters, protocol.Parameter{ID: id, Type: binaryVariantType(tag), State: state, Lexical: lexical, Index: i})
+		value.Parameters = append(value.Parameters, protocol.Parameter{ID: id, Type: binaryVariantType(tag), State: state, Lexical: lexical})
 	}
 	if br.remaining() != 0 {
 		return fmt.Errorf("trailing bytes in PlatformBinary variable block")
@@ -239,6 +240,7 @@ func readBinaryDataset(r *binaryReader, value *protocol.Value) error {
 		return fmt.Errorf("too many PlatformBinary constant columns")
 	}
 	constants := make([]protocol.ConstColumn, 0, constantCount)
+	constantCells := make([]protocol.Cell, 0, constantCount)
 	for i := 0; i < int(constantCount); i++ {
 		id, err := cr.shortString()
 		if err != nil {
@@ -253,7 +255,8 @@ func readBinaryDataset(r *binaryReader, value *protocol.Value) error {
 			return err
 		}
 		state, lexical := binaryCell(v)
-		constants = append(constants, protocol.ConstColumn{ID: id, Type: binaryVariantType(tag), Index: i, Value: protocol.Cell{State: state, Lexical: lexical}})
+		constantCells = append(constantCells, protocol.Cell{State: state, Lexical: lexical})
+		constants = append(constants, protocol.ConstColumn{ID: id, Type: binaryVariantType(tag), Index: i})
 	}
 	if cr.remaining() != 0 {
 		return fmt.Errorf("trailing bytes in PlatformBinary constant block")
@@ -275,7 +278,7 @@ func readBinaryDataset(r *binaryReader, value *protocol.Value) error {
 		if err != nil {
 			return err
 		}
-		size, err := hr.u16()
+		_, err = hr.u16()
 		if err != nil {
 			return err
 		}
@@ -283,20 +286,15 @@ func readBinaryDataset(r *binaryReader, value *protocol.Value) error {
 		if err != nil {
 			return err
 		}
-		column := protocol.Column{ID: id, Type: binaryColumnType(columnType), Index: i}
-		if size != 0 {
-			column.Size = strconv.Itoa(int(size))
-		}
+		column := protocol.Column{ID: id, Type: binaryColumnType(columnType), Index: int(constantCount) + i}
 		if attr&0xf000 == 0x6000 {
 			sumLen, err := hr.u16()
 			if err != nil {
 				return err
 			}
-			sum, err := hr.bytes(int(sumLen))
-			if err != nil {
+			if _, err := hr.bytes(int(sumLen)); err != nil {
 				return err
 			}
-			column.Prop, column.SumText = "SUM", string(sum)
 		}
 		columns = append(columns, column)
 	}
@@ -332,6 +330,7 @@ func readBinaryDataset(r *binaryReader, value *protocol.Value) error {
 			return fmt.Errorf("too many PlatformBinary row values")
 		}
 		row := protocol.Row{Type: binaryRowType(rowType), OrgRow: nil, Values: map[string]protocol.Cell{}}
+		row.MarkOrgRowPresent()
 		for i := 0; i < int(count); i++ {
 			tag, err := rr.u16()
 			if err != nil {
@@ -353,6 +352,7 @@ func readBinaryDataset(r *binaryReader, value *protocol.Value) error {
 				return err
 			}
 			org := &protocol.Row{Type: "O", Values: map[string]protocol.Cell{}}
+			org.MarkOrgRowPresent()
 			for i := 0; i < int(savedCount); i++ {
 				tag, err := rr.u16()
 				if err != nil {
@@ -372,6 +372,10 @@ func readBinaryDataset(r *binaryReader, value *protocol.Value) error {
 		}
 		if rr.remaining() != 0 {
 			return fmt.Errorf("trailing bytes in PlatformBinary row")
+		}
+		// Constant values appear in every row, as in the other formats.
+		for i, constant := range constants {
+			row.Values[constant.ID] = constantCells[i]
 		}
 		dataset.Rows = append(dataset.Rows, row)
 		if len(dataset.Rows) > binaryMaxCount {
@@ -423,15 +427,12 @@ func readBinaryValue(r *binaryReader, tag uint16) (binaryWireValue, error) {
 }
 
 func binaryCell(v binaryWireValue) (string, string) {
-	if v.tag == 0 || v.tag == 1 {
-		return "empty", ""
-	}
 	return binaryCellForType(v, binaryVariantType(v.tag))
 }
 
 func binaryCellForType(v binaryWireValue, dataType string) (string, string) {
 	if v.tag == 0 || v.tag == 1 {
-		return "empty", ""
+		return "null", ""
 	}
 	switch x := v.v.(type) {
 	case string:
@@ -443,6 +444,9 @@ func binaryCellForType(v binaryWireValue, dataType string) (string, string) {
 		}
 		return "value", x
 	case []byte:
+		if len(x) == 0 {
+			return "empty", ""
+		}
 		return "value", base64.StdEncoding.EncodeToString(x)
 	case bool:
 		if x {
@@ -453,12 +457,22 @@ func binaryCellForType(v binaryWireValue, dataType string) (string, string) {
 		return "value", strconv.FormatInt(int64(x), 10)
 	case float64:
 		if v.tag == 41 {
-			return "value", strconv.FormatInt(int64(x), 10)
+			return "value", formatBinaryEpoch(x, dataType)
 		}
-		return "value", strconv.FormatFloat(x, 'g', -1, 64)
+		return "value", javaDouble(x)
 	default:
 		return "value", fmt.Sprint(x)
 	}
+}
+
+// javaDouble formats like Java's Double.toString for values in [1e-3, 1e7),
+// which always keeps a fractional part.
+func javaDouble(x float64) string {
+	text := strconv.FormatFloat(x, 'g', -1, 64)
+	if !strings.ContainsAny(text, ".eEN") {
+		text += ".0"
+	}
+	return text
 }
 
 func binaryVariantType(tag uint16) string {
@@ -507,20 +521,23 @@ func binaryColumnType(code uint16) string {
 
 func encodeBinary(value protocol.Value) ([]byte, error) {
 	if len(value.Parameters) == 0 && len(value.Datasets) == 0 {
-		return nil, nil
+		return []byte{}, nil
 	}
 	var out bytes.Buffer
-	block := &bytes.Buffer{}
-	writeU16(block, uint16(len(value.Parameters)))
-	for _, p := range value.Parameters {
-		if err := writeBinaryVariable(block, p); err != nil {
-			return nil, err
+	// The drivers write the variable block only when there are variables.
+	if len(value.Parameters) > 0 {
+		block := &bytes.Buffer{}
+		writeU16(block, uint16(len(value.Parameters)))
+		for _, p := range value.Parameters {
+			if err := writeBinaryVariable(block, p); err != nil {
+				return nil, err
+			}
 		}
+		writeU16(&out, binaryVariableMark)
+		writeU16(&out, binaryVersion)
+		writeBinaryLength(&out, block.Len())
+		out.Write(block.Bytes())
 	}
-	writeU16(&out, binaryVariableMark)
-	writeU16(&out, binaryVersion)
-	writeBinaryLength(&out, block.Len())
-	out.Write(block.Bytes())
 	for _, dataset := range value.Datasets {
 		if err := writeBinaryDataset(&out, dataset); err != nil {
 			return nil, err
@@ -533,7 +550,36 @@ func writeBinaryVariable(out *bytes.Buffer, p protocol.Parameter) error {
 	if err := writeBinaryShortString(out, p.ID); err != nil {
 		return err
 	}
-	return writeBinaryTypedValue(out, defaultType(p.Type), protocol.Cell{State: p.State, Lexical: p.Lexical})
+	cell := binaryPrimitiveNullAsZero(p.Type, protocol.Cell{State: p.State, Lexical: p.Lexical})
+	return writeBinaryTypedValue(out, defaultType(p.Type), cell)
+}
+
+// binaryPrimitiveNullAsZero writes a null of a primitive Java type as that
+// type's zero; the object types stay null.
+func binaryPrimitiveNullAsZero(dataType string, cell protocol.Cell) protocol.Cell {
+	if cell.State != "null" && cell.State != "missing" {
+		return cell
+	}
+	switch strings.ToUpper(defaultType(dataType)) {
+	case "SHORT", "USHORT", "INT", "UINT", "LONG", "ULONG", "BOOLEAN", "FLOAT", "DOUBLE":
+		return protocol.Cell{State: "value", Lexical: "0"}
+	}
+	return cell
+}
+
+// binaryConstCell converts a constant value to the column type as the
+// drivers do before writing it: an empty value converts like any other
+// lexical, so it becomes zero or null for the non-string types.
+func binaryConstCell(dataType string, cell protocol.Cell) protocol.Cell {
+	cell = binaryPrimitiveNullAsZero(dataType, cell)
+	switch strings.ToUpper(defaultType(dataType)) {
+	case "STRING", "CHAR", "BLOB", "FILE", "UNDEFINED":
+		return cell
+	}
+	if cell.State == "empty" {
+		cell = protocol.Cell{State: "value", Lexical: ""}
+	}
+	return normalizeSourceCell(dataType, cell)
 }
 
 func writeBinaryDataset(out *bytes.Buffer, dataset protocol.Dataset) error {
@@ -553,7 +599,10 @@ func writeBinaryDataset(out *bytes.Buffer, dataset protocol.Dataset) error {
 		if err := writeBinaryShortString(constantBlock, column.ID); err != nil {
 			return err
 		}
-		if err := writeBinaryTypedValue(constantBlock, defaultType(column.Type), column.Value); err != nil {
+		// Constant values stay as given in the text formats; PlatformBinary
+		// writes them converted to the column type.
+		value := binaryConstCell(column.Type, column.Value)
+		if err := writeBinaryTypedValue(constantBlock, defaultType(column.Type), value); err != nil {
 			return err
 		}
 	}
@@ -568,10 +617,7 @@ func writeBinaryDataset(out *bytes.Buffer, dataset protocol.Dataset) error {
 			return err
 		}
 		writeU16(header, binaryColumnCode(defaultType(column.Type)))
-		size := 0
-		if column.Size != "" {
-			size, _ = strconv.Atoi(column.Size)
-		}
+		size, _ := strconv.Atoi(columnSize(column.Size, column.Type))
 		writeU16(header, uint16(size))
 		attr := uint16(1)
 		if strings.EqualFold(column.Prop, "SUM") {
@@ -635,16 +681,13 @@ func writeBinaryRow(out *bytes.Buffer, dataset protocol.Dataset, row protocol.Ro
 	out.Write(body.Bytes())
 	return nil
 }
+
 func writeBinaryTypedValue(out *bytes.Buffer, dataType string, cell protocol.Cell) error {
-	t := strings.ToUpper(dataType)
-	if cell.State == "empty" && (t == "UNDEFINED" || t == "DATASET" || t == "INVALID") {
-		writeU16(out, 21)
-		return writeBinaryLengthBytes(out, nil)
-	}
 	if cell.State != "value" && cell.State != "empty" {
 		writeU16(out, 0)
 		return nil
 	}
+	t := strings.ToUpper(dataType)
 	switch t {
 	case "STRING", "CHAR":
 		writeU16(out, 21)
@@ -669,7 +712,7 @@ func writeBinaryTypedValue(out *bytes.Buffer, dataType string, cell protocol.Cel
 		writeF64(out, value)
 		return nil
 	case "DATE", "TIME", "DATETIME":
-		value, err := parseBinaryEpoch(cell.Lexical)
+		value, err := parseBinaryEpoch(cell.Lexical, t)
 		if err != nil {
 			return err
 		}
@@ -683,9 +726,12 @@ func writeBinaryTypedValue(out *bytes.Buffer, dataType string, cell protocol.Cel
 		}
 		writeU16(out, 26)
 		return writeBinaryLengthBytes(out, value)
-	case "NULL", "UNDEFINED", "DATASET", "INVALID":
+	case "NULL":
 		writeU16(out, 0)
 		return nil
+	case "UNDEFINED", "DATASET", "INVALID":
+		writeU16(out, 21)
+		return writeBinaryLengthBytes(out, []byte(cell.Lexical))
 	default:
 		return fmt.Errorf("unsupported PlatformBinary type %q", dataType)
 	}
@@ -737,18 +783,63 @@ func parseBinaryInt(s string) (int64, error) {
 	return strconv.ParseInt(s, 10, 64)
 }
 
-func parseBinaryEpoch(s string) (int64, error) {
-	s = strings.TrimSpace(s)
-	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
-		return n, nil
+// parseBinaryEpoch reads a canonical date lexical as the drivers do (see
+// javaDate) and returns epoch milliseconds in UTC. PlatformBinary carries
+// every date type as that number.
+func parseBinaryEpoch(s, dataType string) (int64, error) {
+	if t, ok := parseLongYearDate(s, dataType); ok {
+		return t.UnixMilli(), nil
 	}
-	layouts := []string{"20060102150405000", "20060102150405", "20060102", "150405000", "150405", time.RFC3339Nano}
-	for _, layout := range layouts {
-		if t, err := time.ParseInLocation(layout, s, time.UTC); err == nil {
-			return t.UnixMilli(), nil
+	t, ok := javaDate(s, dataType)
+	if !ok {
+		return 0, fmt.Errorf("invalid PlatformBinary %s %q", strings.ToLower(dataType), s)
+	}
+	return t.UnixMilli(), nil
+}
+
+// parseLongYearDate reads the normalized lexical of a date whose year has
+// more than four digits (formatJavaDate never cuts the year), which javaDate
+// cannot tell apart by length.
+func parseLongYearDate(s, dataType string) (time.Time, bool) {
+	tail := 13
+	switch strings.ToUpper(dataType) {
+	case "DATE":
+		tail = 4
+	case "TIME":
+		return time.Time{}, false
+	}
+	if len(s) <= tail+4 {
+		return time.Time{}, false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return time.Time{}, false
 		}
 	}
-	return 0, fmt.Errorf("invalid PlatformBinary epoch %q", s)
+	year, err := strconv.Atoi(s[:len(s)-tail])
+	if err != nil {
+		return time.Time{}, false
+	}
+	rest := s[len(s)-tail:]
+	n := func(i, j int) int { v, _ := strconv.Atoi(rest[i:j]); return v }
+	if tail == 4 {
+		return time.Date(year, time.Month(n(0, 2)), n(2, 4), 0, 0, 0, 0, time.UTC), true
+	}
+	return time.Date(year, time.Month(n(0, 2)), n(2, 4), n(4, 6), n(6, 8), n(8, 10), n(10, 13)*int(time.Millisecond), time.UTC), true
+}
+
+// formatBinaryEpoch is the canonical lexical of a PlatformBinary date for the
+// type it is read as, in UTC.
+func formatBinaryEpoch(ms float64, dataType string) string {
+	t := time.UnixMilli(int64(ms)).UTC()
+	switch strings.ToUpper(dataType) {
+	case "DATE":
+		return t.Format("20060102")
+	case "TIME":
+		return t.Format("150405") + fmt.Sprintf("%03d", t.Nanosecond()/1e6)
+	default:
+		return t.Format("20060102150405") + fmt.Sprintf("%03d", t.Nanosecond()/1e6)
+	}
 }
 
 func writeU16(out *bytes.Buffer, value uint16) {
@@ -764,7 +855,11 @@ func writeU32(out *bytes.Buffer, value uint32) {
 func writeI32(out *bytes.Buffer, value int32) { writeU32(out, uint32(value)) }
 func writeF64(out *bytes.Buffer, value float64) {
 	var b [8]byte
-	binary.BigEndian.PutUint64(b[:], math.Float64bits(value))
+	bits := math.Float64bits(value)
+	if math.IsNaN(value) {
+		bits = 0x7ff8000000000000 // Double.doubleToLongBits canonical NaN
+	}
+	binary.BigEndian.PutUint64(b[:], bits)
 	out.Write(b[:])
 }
 func writeBinaryLength(out *bytes.Buffer, n int) {

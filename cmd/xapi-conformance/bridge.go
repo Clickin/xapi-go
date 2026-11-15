@@ -101,7 +101,8 @@ func makeRootType(canonical map[string]any) (reflect.Type, error) {
 func makeRowType(dataset map[string]any) (reflect.Type, error) {
 	var fields []reflect.StructField
 	index := 0
-	for _, raw := range append(array(dataset["constColumns"]), array(dataset["columns"])...) {
+	constants := len(array(dataset["constColumns"]))
+	for i, raw := range append(array(dataset["constColumns"]), array(dataset["columns"])...) {
 		column, ok := raw.(map[string]any)
 		if !ok {
 			return nil, fmt.Errorf("column must be object")
@@ -110,6 +111,11 @@ func makeRowType(dataset map[string]any) (reflect.Type, error) {
 		typ := canonicalType(column["type"])
 		role := "col"
 		valueTag := ""
+		// A PlatformBinary decode reports constant values in the rows, so a
+		// constant column can come without a value.
+		if i < constants {
+			role = "const"
+		}
 		if _, ok := column["value"]; ok {
 			role = "const"
 			if cell, ok := column["value"].(map[string]any); ok && cell["state"] == "value" {
@@ -119,7 +125,11 @@ func makeRowType(dataset map[string]any) (reflect.Type, error) {
 				}
 			}
 		}
-		fields = append(fields, reflect.StructField{Name: fieldName(id, index), Type: optionalType(typ), Tag: xapiTag(role, id, typ, true, valueTag)})
+		tag := xapiTag(role, id, typ, true, valueTag)
+		if size := rawString(column["size"]); size != "" && size != "0" {
+			tag = reflect.StructTag(strings.TrimSuffix(string(tag), `"`) + ",size=" + size + `"`)
+		}
+		fields = append(fields, reflect.StructField{Name: fieldName(id, index), Type: optionalType(typ), Tag: tag})
 		index++
 	}
 	return reflect.StructOf(fields), nil
@@ -369,11 +379,13 @@ func validateWithLibrary(data []byte, name string, canonical map[string]any) (er
 // isRejectedValue reports a cell or parameter whose text cannot be converted to
 // its declared type. The original drivers turn an invalid DATE into null and keep
 // illegal base64 as it is; the typed API reports both so that bad data does not
-// read as a value.
+// read as a value. TIME and DATETIME follow the same rule.
 func isRejectedValue(err error) bool {
 	if err == nil {
 		return false
 	}
 	var corrupt base64.CorruptInputError
-	return errors.As(err, &corrupt) || strings.Contains(err.Error(), "invalid DATE ")
+	message := err.Error()
+	return errors.As(err, &corrupt) || strings.Contains(message, "invalid DATE ") ||
+		strings.Contains(message, "invalid TIME ") || strings.Contains(message, "invalid DATETIME ")
 }

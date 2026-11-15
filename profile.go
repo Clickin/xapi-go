@@ -4,15 +4,17 @@ import "fmt"
 
 type Profile uint8
 
+// The zero Profile is XPlatformXML5000, the root the original XPLATFORM
+// driver writes (xmlns "http://www.tobesoft.com/platform/dataset", ver 5000).
 const (
-	XPlatformXML4000 Profile = iota
+	XPlatformXML5000 Profile = iota
 	NexacroXML4000
 	NexacroJSON10
 	NexacroSSV
 	XPlatformSSV
 	NexacroBinary5000
 	XPlatformBinary5000
-	XPlatformXML5000
+	XPlatformXML4000
 )
 
 func (p Profile) String() string {
@@ -55,7 +57,7 @@ func (p Profile) namespace() string {
 	}
 }
 func (p Profile) valid() error {
-	if p > XPlatformXML5000 {
+	if p > XPlatformXML4000 {
 		return fmt.Errorf("xapi: unsupported profile %d", p)
 	}
 	return nil
